@@ -90,7 +90,7 @@ public func _arrayForceCast<SourceElement, TargetElement>(
         p += 1
       }
     }
-    return Array(_buffer: _ArrayBuffer(buf, shiftedToStartIndex: 0))
+    return Array(_buffer: _ArrayBuffer(_buffer: buf, shiftedToStartIndex: 0))
     
   case (.value, .explicit):
     _sanityCheckFailure(
@@ -169,7 +169,7 @@ ElementwiseBridging:
       p.initialize(with: value!)
       p += 1
     }
-    return Array(_buffer: _ArrayBuffer(buf, shiftedToStartIndex: 0))
+    return Array(_buffer: _ArrayBuffer(_buffer: buf, shiftedToStartIndex: 0))
   }
   while false
   
