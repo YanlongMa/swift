@@ -34,11 +34,39 @@ func printSequence<T : Sequence>(_ x: T) {
 
 typealias BufferID = UnsafePointer<Void>?
 
-func bufferID<T : _ArrayProtocol>(_ x: T) -> BufferID {
-  return x._buffer.identity
+protocol MyArrayProtocol
+  : RandomAccessCollection,
+    RangeReplaceableCollection,
+    MutableCollection,
+    ArrayLiteralConvertible {
+
+  associatedtype Iterator : IteratorProtocol
+
+  var _owner: AnyObject? { get }
+
+  var capacity: Int { get }
+
+  func += <
+    S : Sequence
+    where
+    S.Iterator.Element == Iterator.Element
+  >(lhs: inout Self, rhs: S)
+}
+extension MyArrayProtocol {
+  var _bufferID: BufferID {
+    return unsafeBitCast(_owner, to: BufferID.self)
+  }
+}
+extension Array : MyArrayProtocol {}
+extension ArraySlice : MyArrayProtocol {}
+extension ContiguousArray : MyArrayProtocol {}
+
+
+func bufferID<T : MyArrayProtocol>(_ x: T) -> BufferID {
+  return x._bufferID
 }
 
-func checkReallocation<T : _ArrayProtocol>(
+func checkReallocation<T : MyArrayProtocol>(
   _ x: T, _ lastBuffer: BufferID, _ reallocationExpected: Bool
 ) -> BufferID {
   let currentBuffer = bufferID(x)
@@ -62,13 +90,12 @@ func checkEqual<
 }
 
 func test<
-  T : _ArrayProtocol
+  T : MyArrayProtocol
   where
-  T.Iterator.Element == T._Buffer.Element,
-  T._Buffer.Element == T.Element,
-  T.Element == LifetimeTracked,
+  T.Iterator.Element == LifetimeTracked,
+  T.Iterator.Element == T.Element,
   T.Index == Int,
-  T : RandomAccessCollection
+  T.IndexDistance == Int
 >(_: T.Type, _ label: String) {
   print("test: \(label)...", terminator: "")
 
