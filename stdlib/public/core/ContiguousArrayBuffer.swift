@@ -573,7 +573,7 @@ internal func _copySequenceToContiguousArray<
 }
 
 extension Collection {
-  internal func _copyToContiguousArray() -> ContiguousArray<Iterator.Element> {
+  public func _copyToContiguousArray() -> ContiguousArray<Iterator.Element> {
     return _copyCollectionToContiguousArray(self)
   }
 }
