@@ -75,19 +75,20 @@ all_array_types = ['ContiguousArray', 'ArraySlice', 'Array']
 
 extension Array {
   var identity: UnsafePointer<Void> {
-    return self._buffer.identity
+    return unsafeBitCast(self, to: UnsafePointer<Void>.self)
   }
 }
 
 extension ArraySlice {
-  var identity: UnsafePointer<Void> {
-    return self._buffer.identity
+  typealias Identity = (UnsafePointer<Void>, UnsafePointer<Void>, UnsafePointer<Void>, UnsafePointer<Void>)
+  var identity: Identity {
+    return unsafeBitCast(self, to: Identity.self)
   }
 }
 
 extension ContiguousArray {
   var identity: UnsafePointer<Void> {
-    return self._buffer.identity
+    return unsafeBitCast(self, to: UnsafePointer<Void>.self)
   }
 }
 
@@ -246,10 +247,10 @@ ArrayTestSuite.test("${array_type}/emptyAllocation") {
   let arr0 = ${array_type}<Int>()
   let arr1 = ${array_type}<LifetimeTracked>(repeating: LifetimeTracked(0), count: 0)
   // Empty arrays all use the same buffer
-  expectEqual(arr0._buffer.identity, arr1._buffer.identity)
+  expectEqual(arr0.identity, arr1.identity)
 
   let arr2: ${array_type}<LifetimeTracked> = []
-  let emptyLiteralsShareBuffer = arr0._buffer.identity == arr2._buffer.identity
+  let emptyLiteralsShareBuffer = arr0.identity == arr2.identity
   expectTrue(emptyLiteralsShareBuffer)
 }
 
