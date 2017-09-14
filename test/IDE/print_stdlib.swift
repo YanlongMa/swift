@@ -2,26 +2,22 @@
 //
 // REQUIRES: nonexecutable_test
 //
-// RUN: %target-swift-frontend -parse %s
+// RUN: %target-swift-frontend -typecheck %s
 // RUN: %target-swift-ide-test -print-module -module-to-print=Swift -source-filename %s -print-interface > %t.txt
-// RUN: FileCheck -check-prefix=CHECK-ARGC %s < %t.txt
-// RUN: FileCheck %s < %t.txt
-// RUN: FileCheck -check-prefix=CHECK-SUGAR %s < %t.txt
-// RUN: FileCheck -check-prefix=CHECK-MUTATING-ATTR %s < %t.txt
-// RUN: FileCheck -check-prefix=NO-FIXMES %s < %t.txt
-// RUN: FileCheck -check-prefix=CHECK-ARGC %s < %t.txt
+// RUN: %FileCheck -check-prefix=CHECK-ARGC %s < %t.txt
+// RUN: %FileCheck %s < %t.txt
+// RUN: %FileCheck -check-prefix=CHECK-SUGAR %s < %t.txt
+// RUN: %FileCheck -check-prefix=CHECK-MUTATING-ATTR %s < %t.txt
+// RUN: %FileCheck -check-prefix=NO-FIXMES %s < %t.txt
+// RUN: %FileCheck -check-prefix=CHECK-ARGC %s < %t.txt
 
 // RUN: %target-swift-ide-test -print-module -module-to-print=Swift -source-filename %s -print-interface-doc > %t-doc.txt
-// RUN: FileCheck %s < %t-doc.txt
+// RUN: %FileCheck %s < %t-doc.txt
 
 // RUN: %target-swift-ide-test -print-module -module-to-print=Swift -source-filename %s -print-interface -skip-underscored-stdlib-protocols > %t-prot.txt
-// RUN: FileCheck -check-prefix=CHECK-UNDERSCORED-PROT %s < %t-prot.txt
-// CHECK-UNDERSCORED-PROT: public protocol _DisallowMixedSignArithmetic
+// RUN: %FileCheck -check-prefix=CHECK-UNDERSCORED-PROT %s < %t-prot.txt
 // CHECK-UNDERSCORED-PROT: public protocol _Incrementable
-// CHECK-UNDERSCORED-PROT: public protocol _Integer
-// CHECK-UNDERSCORED-PROT: public protocol _IntegerArithmetic
 // CHECK-UNDERSCORED-PROT: public protocol _SequenceWrapper
-// CHECK-UNDERSCORED-PROT: public protocol _SignedInteger
 // CHECK-UNDERSCORED-PROT-NOT: protocol _
 
 // CHECK-ARGC: static var argc: Int32 { get }
@@ -37,8 +33,6 @@
 // CHECK-NOT: func ~>
 // CHECK-NOT: _builtin
 // CHECK-NOT: Builtin.
-// CHECK-NOT: RawPointer
-// CHECK-NOT: extension [
 // CHECK-NOT: extension {{.*}}?
 // CHECK-NOT: extension {{.*}}!
 // CHECK-NOT: addressWithOwner
@@ -58,7 +52,7 @@ func foo(x: _Pointer) {} // Checks that this protocol actually exists.
 
 // NO-FIXMES-NOT: FIXME
 // RUN: %target-swift-ide-test -print-module-groups -module-to-print=Swift -source-filename %s -print-interface > %t-group.txt
-// RUN: FileCheck -check-prefix=CHECK-GROUPS1 %s < %t-group.txt
+// RUN: %FileCheck -check-prefix=CHECK-GROUPS1 %s < %t-group.txt
 // CHECK-GROUPS1: Module groups begin:
 // CHECK-GROUPS1-DAG: Pointer
 // CHECK-GROUPS1-DAG: C

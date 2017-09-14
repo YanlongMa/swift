@@ -17,10 +17,26 @@ public protocol P {
   associatedtype B
 }
 
-public struct Foo<T, U> : P {
+public protocol Q : P {}
+
+public struct ConformsP<T, U> : P {
   public typealias A = Box<U>
   public typealias B = Box<T>
 }
+
+public struct ConformsQ<T, U> : Q {
+  public typealias A = Box<U>
+  public typealias B = Box<T>
+}
+
+public class Base<T, U> : P {
+  public typealias A = Box<T>
+  public typealias B = Box<U>
+}
+
+public class Derived : Base<Int8, Int16> {}
+
+public class GenericDerived<T> : Base<T, T> {}
 
 public struct Bar<T : P> {
   public let a: T.A
@@ -29,7 +45,11 @@ public struct Bar<T : P> {
 }
 
 public struct AssocTypeStruct {
-  public let t: Bar<Foo<Int8, Int16>>
+  public let t1: Bar<ConformsP<Int8, Int16>>
+  public let t2: Bar<ConformsQ<Int8, Int16>>
+  public let t3: Bar<Base<Int8, Int16>>
+  public let t4: Bar<Derived>
+  public let t5: Bar<GenericDerived<Int8>>
 }
 
 public class C {}
@@ -76,8 +96,8 @@ public struct ExistentialStruct {
   public let anyProto: P1
   public let optionalAnyProto: P1?
 
-  public let anyProtoComposition: protocol<P1, P2, P3>
-  public let optionalAnyProtoComposition: protocol<P1, P2, P3>?
+  public let anyProtoComposition: P1 & P2 & P3
+  public let optionalAnyProtoComposition: (P1 & P2 & P3)?
 
   public let anyClassBoundProto1: CP1
   public let optionalAnyClassBoundProto1: CP1?
@@ -85,14 +105,16 @@ public struct ExistentialStruct {
   public let anyClassBoundProto2: CP2
   public let optionalAnyClassBoundProto2: CP2?
 
-  public let anyClassBoundProtoComposition1: protocol<CP1, CP2>
-  public let optionalAnyClassBoundProtoComposition1: protocol<CP1, CP2>?
+  public let anyClassBoundProtoComposition1: CP1 & CP2
+  public let optionalAnyClassBoundProtoComposition1: (CP1 & CP2)?
 
-  public let anyClassBoundProtoComposition2: protocol<P1, CP2>
-  public let optionalAnyClassBoundProtoComposition2: protocol<P1, CP2>?
-
+  public let anyClassBoundProtoComposition2: P1 & CP2
+  public let optionalAnyClassBoundProtoComposition2: (P1 & CP2)?
+  
   public weak var weakAnyObject: AnyObject?
   public weak var weakAnyClassBoundProto: CP1?
+
+  public let classConstrainedP1: C & P1
 }
 
 public struct MetadataHolder<T, U> {
@@ -110,8 +132,8 @@ public struct MetatypeStruct {
   public let anyProto: P1.Type
   public let optionalAnyProto: P1.Type?
 
-  public let anyProtoComposition: protocol<P1, P2, P3>.Type
-  public let optionalAnyProtoComposition: protocol<P1, P2, P3>.Type?
+  public let anyProtoComposition: (P1 & P2 & P3).Type
+  public let optionalAnyProtoComposition: (P1 & P2 & P3).Type?
 
   public let structMetatype: BasicStruct.Type
   public let optionalStructMetatype: BasicStruct.Type?

@@ -1,4 +1,4 @@
-// RUN: %target-run-simple-swift | FileCheck %s
+// RUN: %target-run-simple-swift | %FileCheck %s
 // REQUIRES: executable_test
 
 // REQUIRES: objc_interop
@@ -36,12 +36,12 @@ band.members = [Person(firstName: "John", lastName: "Lennon"),
 // CHECK: ===Members===
 // CHECK-NEXT: (
 // CHECK-NEXT:    Lennon, John
-// CHECK-NEXT     McCartney, Paul,
-// CHECK-NEXT     Harrison, George,
-// CHECK-NEXT     Star, Ringo
-// CHECK-NEXT)
+// CHECK-NEXT:    McCartney, Paul
+// CHECK-NEXT:    Harrison, George
+// CHECK-NEXT:    Star, Ringo
+// CHECK-NEXT: )
 print("===Members===")
-print(band.value(forKeyPath: #keyPath(Band.members))!.description)
+print((band.value(forKeyPath: #keyPath(Band.members))! as AnyObject).description)
 
 // CHECK: ===First Names===
 // CHECK-NEXT: (
@@ -51,7 +51,7 @@ print(band.value(forKeyPath: #keyPath(Band.members))!.description)
 // CHECK-NEXT:    Ringo
 // CHECK-NEXT:)
 print("===First Names===")
-print(band.value(forKeyPath: #keyPath(Band.members.firstName))!.description)
+print((band.value(forKeyPath: #keyPath(Band.members.firstName))! as AnyObject).description)
 
 let recordLabel = RecordLabel()
 recordLabel.bands["Beatles"] = band
@@ -64,7 +64,7 @@ recordLabel.bands["Beatles"] = band
 // CHECK-NEXT:     Star
 // CHECK-NEXT: )
 print("===Last Names===")
-print(recordLabel.value(forKeyPath: #keyPath(RecordLabel.bands.Beatles.members.lastName))!.description)
+print((recordLabel.value(forKeyPath: #keyPath(RecordLabel.bands.Beatles.members.lastName))! as AnyObject).description)
 
 // CHECK: DONE
 print("DONE")

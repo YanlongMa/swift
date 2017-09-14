@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -39,7 +39,7 @@ public struct IteratorOverOne<Element> : IteratorProtocol, Sequence {
 public struct CollectionOfOne<Element>
   : MutableCollection, RandomAccessCollection {
 
-  /// Construct an instance containing just `element`.
+  /// Creates an instance containing just `element`.
   public init(_ element: Element) {
     self._element = element
   }
@@ -81,7 +81,7 @@ public struct CollectionOfOne<Element>
     return IteratorOverOne(_elements: _element)
   }
 
-  /// Access the element at `position`.
+  /// Accesses the element at `position`.
   ///
   /// - Precondition: `position == 0`.
   public subscript(position: Int) -> Element {
@@ -129,15 +129,5 @@ extension CollectionOfOne : CustomDebugStringConvertible {
 extension CollectionOfOne : CustomReflectable {
   public var customMirror: Mirror {
     return Mirror(self, children: ["element": _element])
-  }
-}
-
-@available(*, unavailable, renamed: "IteratorOverOne")
-public struct GeneratorOfOne<Element> {}
-
-extension IteratorOverOne {
-  @available(*, unavailable, renamed: "makeIterator()")
-  public func generate() -> IteratorOverOne<Element> {
-    Builtin.unreachable()
   }
 }

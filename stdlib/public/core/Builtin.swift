@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -14,52 +14,6 @@ import SwiftShims
 
 // Definitions that make elements of Builtin usable in real code
 // without gobs of boilerplate.
-
-/// Returns the contiguous memory footprint of `T`.
-///
-/// Does not include any dynamically-allocated or "remote" storage.
-/// In particular, `sizeof(X.self)`, when `X` is a class type, is the
-/// same regardless of how many stored properties `X` has.
-@_transparent
-public func sizeof<T>(_:T.Type) -> Int {
-  return Int(Builtin.sizeof(T.self))
-}
-
-/// Returns the contiguous memory footprint of  `T`.
-///
-/// Does not include any dynamically-allocated or "remote" storage.
-/// In particular, `sizeof(a)`, when `a` is a class instance, is the
-/// same regardless of how many stored properties `a` has.
-@_transparent
-public func sizeofValue<T>(_:T) -> Int {
-  return sizeof(T.self)
-}
-
-/// Returns the minimum memory alignment of `T`.
-@_transparent
-public func alignof<T>(_:T.Type) -> Int {
-  return Int(Builtin.alignof(T.self))
-}
-
-/// Returns the minimum memory alignment of `T`.
-@_transparent
-public func alignofValue<T>(_:T) -> Int {
-  return alignof(T.self)
-}
-
-/// Returns the least possible interval between distinct instances of
-/// `T` in memory.  The result is always positive.
-@_transparent
-public func strideof<T>(_:T.Type) -> Int {
-  return Int(Builtin.strideof_nonzero(T.self))
-}
-
-/// Returns the least possible interval between distinct instances of
-/// `T` in memory.  The result is always positive.
-@_transparent
-public func strideofValue<T>(_:T) -> Int {
-  return strideof(T.self)
-}
 
 // This function is the implementation of the `_roundUp` overload set.  It is
 // marked `@inline(__always)` to make primary `_roundUp` entry points seem
@@ -88,20 +42,6 @@ internal func _roundUp(_ offset: Int, toAlignment alignment: Int) -> Int {
   return Int(_roundUpImpl(UInt(bitPattern: offset), toAlignment: alignment))
 }
 
-@_versioned
-internal func _roundUp<T, DestinationType>(
-  _ pointer: UnsafeMutablePointer<T>,
-  toAlignmentOf destinationType: DestinationType.Type
-) -> UnsafeMutablePointer<DestinationType> {
-  // Note: unsafe unwrap is safe because this operation can only increase the
-  // value, and can not produce a null pointer.
-  return UnsafeMutablePointer<DestinationType>(
-    bitPattern: _roundUpImpl(
-      UInt(bitPattern: pointer),
-      toAlignment: alignof(DestinationType.self))
-  ).unsafelyUnwrapped
-}
-
 /// Returns a tri-state of 0 = no, 1 = yes, 2 = maybe.
 @_transparent
 public // @testable
@@ -109,53 +49,102 @@ func _canBeClass<T>(_: T.Type) -> Int8 {
   return Int8(Builtin.canBeClass(T.self))
 }
 
-/// Returns the bits of `x`, interpreted as having type `U`.
+/// Returns the bits of the given instance, interpreted as having the specified
+/// type.
 ///
-/// - Warning: Breaks the guarantees of Swift's type system; use
-///   with extreme care.  There's almost always a better way to do
-///   anything.
+/// Use this function only to convert the instance passed as `x` to a
+/// layout-compatible type when conversion through other means is not
+/// possible. Common conversions supported by the Swift standard library
+/// include the following:
 ///
+/// - Value conversion from one integer type to another. Use the destination
+///   type's initializer or the `numericCast(_:)` function.
+/// - Bitwise conversion from one integer type to another. Use the destination
+///   type's `init(truncatingIfNeeded:)` or `init(bitPattern:)` initializer.
+/// - Conversion from a pointer to an integer value with the bit pattern of the
+///   pointer's address in memory, or vice versa. Use the `init(bitPattern:)`
+///   initializer for the destination type.
+/// - Casting an instance of a reference type. Use the casting operators (`as`,
+///   `as!`, or `as?`) or the `unsafeDowncast(_:to:)` function. Do not use
+///   `unsafeBitCast(_:to:)` with class or pointer types; doing so may
+///   introduce undefined behavior.
+///
+/// - Warning: Calling this function breaks the guarantees of the Swift type
+///   system; use with extreme care.
+///
+/// - Parameters:
+///   - x: The instance to cast to `type`.
+///   - type: The type to cast `x` to. `type` and the type of `x` must have the
+///     same size of memory representation and compatible memory layout.
+/// - Returns: A new instance of type `U`, cast from `x`.
 @_transparent
-public func unsafeBitCast<T, U>(_ x: T, to: U.Type) -> U {
-  _precondition(sizeof(T.self) == sizeof(U.self),
-    "can't unsafeBitCast between types of different sizes")
+public func unsafeBitCast<T, U>(_ x: T, to type: U.Type) -> U {
+  _precondition(MemoryLayout<T>.size == MemoryLayout<U>.size,
+    "Can't unsafeBitCast between types of different sizes")
+  return Builtin.reinterpretCast(x)
+}
+
+/// Returns `x` as its concrete type `U`.
+///
+/// This cast can be useful for dispatching to specializations of generic
+/// functions.
+///
+/// - Requires: `x` has type `U`.
+@_transparent
+public func _identityCast<T, U>(_ x: T, to expectedType: U.Type) -> U {
+  _precondition(T.self == expectedType, "_identityCast to wrong type")
   return Builtin.reinterpretCast(x)
 }
 
 /// `unsafeBitCast` something to `AnyObject`.
 @_transparent
-public func _reinterpretCastToAnyObject<T>(_ x: T) -> AnyObject {
+internal func _reinterpretCastToAnyObject<T>(_ x: T) -> AnyObject {
   return unsafeBitCast(x, to: AnyObject.self)
 }
 
+@_inlineable
+@_versioned
 @_transparent
-func ==(lhs: Builtin.NativeObject, rhs: Builtin.NativeObject) -> Bool {
+func == (lhs: Builtin.NativeObject, rhs: Builtin.NativeObject) -> Bool {
   return unsafeBitCast(lhs, to: Int.self) == unsafeBitCast(rhs, to: Int.self)
 }
 
+@_inlineable
+@_versioned
 @_transparent
-func !=(lhs: Builtin.NativeObject, rhs: Builtin.NativeObject) -> Bool {
+func != (lhs: Builtin.NativeObject, rhs: Builtin.NativeObject) -> Bool {
   return !(lhs == rhs)
 }
 
+@_inlineable
+@_versioned
 @_transparent
-func ==(lhs: Builtin.RawPointer, rhs: Builtin.RawPointer) -> Bool {
+func == (lhs: Builtin.RawPointer, rhs: Builtin.RawPointer) -> Bool {
   return unsafeBitCast(lhs, to: Int.self) == unsafeBitCast(rhs, to: Int.self)
 }
 
+@_inlineable
+@_versioned
 @_transparent
-func !=(lhs: Builtin.RawPointer, rhs: Builtin.RawPointer) -> Bool {
+func != (lhs: Builtin.RawPointer, rhs: Builtin.RawPointer) -> Bool {
   return !(lhs == rhs)
 }
 
 /// Returns `true` iff `t0` is identical to `t1`; i.e. if they are both
 /// `nil` or they both represent the same type.
+@_inlineable
 public func == (t0: Any.Type?, t1: Any.Type?) -> Bool {
-  return unsafeBitCast(t0, to: Int.self) == unsafeBitCast(t1, to: Int.self)
+  switch (t0, t1) {
+  case (.none, .none): return true
+  case let (.some(ty0), .some(ty1)):
+    return Bool(Builtin.is_same_metatype(ty0, ty1))
+  default: return false
+  }
 }
 
 /// Returns `false` iff `t0` is identical to `t1`; i.e. if they are both
 /// `nil` or they both represent the same type.
+@_inlineable
 public func != (t0: Any.Type?, t1: Any.Type?) -> Bool {
   return !(t0 == t1)
 }
@@ -175,8 +164,8 @@ internal func _unreachable(_ condition: Bool = true) {
 
 /// Tell the optimizer that this code is unreachable if this builtin is
 /// reachable after constant folding build configuration builtins.
-@_versioned @_transparent @noreturn internal
-func _conditionallyUnreachable() {
+@_versioned @_transparent internal
+func _conditionallyUnreachable() -> Never {
   Builtin.conditionallyUnreachable()
 }
 
@@ -189,31 +178,18 @@ func _swift_isClassOrObjCExistentialType<T>(_ x: T.Type) -> Bool
 @_versioned
 @inline(__always)
 internal func _isClassOrObjCExistential<T>(_ x: T.Type) -> Bool {
-  let tmp = _canBeClass(x)
 
+  switch _canBeClass(x) {
   // Is not a class.
-  if tmp == 0 {
+  case 0:
     return false
   // Is a class.
-  } else if tmp == 1 {
+  case 1:
     return true
-  }
-
   // Maybe a class.
-  return _swift_isClassOrObjCExistentialType(x)
-}
-
-/// Returns an `UnsafePointer` to the storage used for `object`.  There's
-/// not much you can do with this other than use it to identify the
-/// object.
-@_transparent
-public func unsafeAddress(of object: AnyObject) -> UnsafePointer<Void> {
-  return UnsafePointer(Builtin.bridgeToRawPointer(object))
-}
-
-@available(*, unavailable, renamed: "unsafeAddress(of:)")
-public func unsafeAddressOf(_ object: AnyObject) -> UnsafePointer<Void> {
-  Builtin.unreachable()
+  default:
+    return _swift_isClassOrObjCExistentialType(x)
+  }
 }
 
 /// Converts a reference of type `T` to a reference of type `U` after
@@ -227,29 +203,39 @@ public func _unsafeReferenceCast<T, U>(_ x: T, to: U.Type) -> U {
   return Builtin.castReference(x)
 }
 
-/// - returns: `x as T`.
+/// Returns the given instance cast unconditionally to the specified type.
 ///
-/// - Precondition: `x is T`.  In particular, in -O builds, no test is
-///   performed to ensure that `x` actually has dynamic type `T`.
+/// The instance passed as `x` must be an instance of type `T`.
 ///
-/// - Warning: Trades safety for performance.  Use `unsafeDowncast`
-///   only when `x as T` has proven to be a performance problem and you
-///   are confident that, always, `x is T`.  It is better than an
-///   `unsafeBitCast` because it's more restrictive, and because
-///   checking is still performed in debug builds.
+/// Use this function instead of `unsafeBitcast(_:to:)` because this function
+/// is more restrictive and still performs a check in debug builds. In -O
+/// builds, no test is performed to ensure that `x` actually has the dynamic
+/// type `T`.
+///
+/// - Warning: This function trades safety for performance. Use
+///   `unsafeDowncast(_:to:)` only when you are confident that `x is T` always
+///   evaluates to `true`, and only after `x as! T` has proven to be a
+///   performance problem.
+///
+/// - Parameters:
+///   - x: An instance to cast to type `T`.
+///   - type: The type `T` to which `x` is cast.
+/// - Returns: The instance `x`, cast to type `T`.
 @_transparent
-public func unsafeDowncast<T : AnyObject>(_ x: AnyObject, to: T.Type) -> T {
+public func unsafeDowncast<T : AnyObject>(_ x: AnyObject, to type: T.Type) -> T {
   _debugPrecondition(x is T, "invalid unsafeDowncast")
   return Builtin.castReference(x)
 }
 
+import SwiftShims
+
 @inline(__always)
 public func _getUnsafePointerToStoredProperties(_ x: AnyObject)
-  -> UnsafeMutablePointer<UInt8> {
+  -> UnsafeMutableRawPointer {
   let storedPropertyOffset = _roundUp(
-    sizeof(_HeapObject.self),
-    toAlignment: alignof(Optional<AnyObject>.self))
-  return UnsafeMutablePointer<UInt8>(Builtin.bridgeToRawPointer(x)) +
+    MemoryLayout<SwiftShims.HeapObject>.size,
+    toAlignment: MemoryLayout<Optional<AnyObject>>.alignment)
+  return UnsafeMutableRawPointer(Builtin.bridgeToRawPointer(x)) +
     storedPropertyOffset
 }
 
@@ -264,23 +250,22 @@ public func _getUnsafePointerToStoredProperties(_ x: AnyObject)
 @_versioned
 @_transparent
 @_semantics("branchhint")
-internal func _branchHint<C : Boolean>(_ actual: C, expected: Bool)
-  -> Bool {
-  return Bool(Builtin.int_expect_Int1(actual.boolValue._value, expected._value))
+internal func _branchHint(_ actual: Bool, expected: Bool) -> Bool {
+  return Bool(Builtin.int_expect_Int1(actual._value, expected._value))
 }
 
 /// Optimizer hint that `x` is expected to be `true`.
 @_transparent
 @_semantics("fastpath")
-public func _fastPath<C: Boolean>(_ x: C) -> Bool {
-  return _branchHint(x.boolValue, expected: true)
+public func _fastPath(_ x: Bool) -> Bool {
+  return _branchHint(x, expected: true)
 }
 
 /// Optimizer hint that `x` is expected to be `false`.
 @_transparent
 @_semantics("slowpath")
-public func _slowPath<C : Boolean>(_ x: C) -> Bool {
-  return _branchHint(x.boolValue, expected: false)
+public func _slowPath(_ x: Bool) -> Bool {
+  return _branchHint(x, expected: false)
 }
 
 /// Optimizer hint that the code where this function is called is on the fast
@@ -294,17 +279,20 @@ public func _onFastPath() {
 
 /// Returns `true` iff the class indicated by `theClass` uses native
 /// Swift reference-counting.
+#if _runtime(_ObjC)
+// Declare it here instead of RuntimeShims.h, because we need to specify
+// the type of argument to be AnyClass. This is currently not possible
+// when using RuntimeShims.h
+@_versioned
+@_silgen_name("swift_objc_class_usesNativeSwiftReferenceCounting")
+func _usesNativeSwiftReferenceCounting(_ theClass: AnyClass) -> Bool
+#else
 @_versioned
 @inline(__always)
-internal func _usesNativeSwiftReferenceCounting(_ theClass: AnyClass) -> Bool {
-#if _runtime(_ObjC)
-  return swift_objc_class_usesNativeSwiftReferenceCounting(
-    unsafeAddress(of: theClass)
-  )
-#else
+func _usesNativeSwiftReferenceCounting(_ theClass: AnyClass) -> Bool {
   return true
-#endif
 }
+#endif
 
 @_silgen_name("swift_class_getInstanceExtents")
 func swift_class_getInstanceExtents(_ theClass: AnyClass)
@@ -314,7 +302,6 @@ func swift_class_getInstanceExtents(_ theClass: AnyClass)
 func swift_objc_class_unknownGetInstanceExtents(_ theClass: AnyClass)
   -> (negative: UInt, positive: UInt)
 
-/// - Returns: 
 @inline(__always)
 internal func _class_getInstancePositiveExtentSize(_ theClass: AnyClass) -> Int {
 #if _runtime(_ObjC)
@@ -395,15 +382,19 @@ internal var _objCTaggedPointerBits: UInt {
     @inline(__always) get { return 0 }
 }
 #elseif arch(s390x)
+@_versioned
 internal var _objectPointerSpareBits: UInt {
   @inline(__always) get { return 0x0000_0000_0000_0007 }
 }
+@_versioned
 internal var _objectPointerIsObjCBit: UInt {
   @inline(__always) get { return 0x0000_0000_0000_0002 }
 }
+@_versioned
 internal var _objectPointerLowSpareBitShift: UInt {
   @inline(__always) get { return 0 }
 }
+@_versioned
 internal var _objCTaggedPointerBits: UInt {
   @inline(__always) get { return 0 }
 }
@@ -479,7 +470,7 @@ internal func _makeBridgeObject(
 
   _sanityCheck(
     _isObjCTaggedPointer(object)
-    || _usesNativeSwiftReferenceCounting(object.dynamicType)
+    || _usesNativeSwiftReferenceCounting(type(of: object))
     || bits == _objectPointerIsObjCBit,
     "All spare bits must be set in non-native, non-tagged bridge objects"
   )
@@ -493,14 +484,16 @@ internal func _makeBridgeObject(
   )
 }
 
+@_versioned
+@_silgen_name("_swift_class_getSuperclass")
+internal func _swift_class_getSuperclass(_ t: AnyClass) -> AnyClass?
+
 /// Returns the superclass of `t`, if any.  The result is `nil` if `t` is
 /// a root class or class protocol.
 @inline(__always)
 public // @testable
 func _getSuperclass(_ t: AnyClass) -> AnyClass? {
-  return unsafeBitCast(
-    _swift_class_getSuperclass(unsafeBitCast(t, to: OpaquePointer.self)),
-    to: AnyClass.self)
+  return _swift_class_getSuperclass(t)
 }
 
 /// Returns the superclass of `t`, if any.  The result is `nil` if `t` is
@@ -556,7 +549,7 @@ func _isUnique_native<T>(_ object: inout T) -> Bool {
     (_bitPattern(Builtin.reinterpretCast(object)) & _objectPointerSpareBits)
     == 0)
   _sanityCheck(_usesNativeSwiftReferenceCounting(
-      (Builtin.reinterpretCast(object) as AnyObject).dynamicType))
+      type(of: Builtin.reinterpretCast(object) as AnyObject)))
   return Bool(Builtin.isUnique_native(&object))
 }
 
@@ -571,7 +564,7 @@ func _isUniqueOrPinned_native<T>(_ object: inout T) -> Bool {
     (_bitPattern(Builtin.reinterpretCast(object)) & _objectPointerSpareBits)
     == 0)
   _sanityCheck(_usesNativeSwiftReferenceCounting(
-      (Builtin.reinterpretCast(object) as AnyObject).dynamicType))
+      type(of: Builtin.reinterpretCast(object) as AnyObject)))
   return Bool(Builtin.isUniqueOrPinned_native(&object))
 }
 
@@ -590,7 +583,256 @@ func _isOptional<T>(_ type: T.Type) -> Bool {
   return Bool(Builtin.isOptional(type))
 }
 
-@available(*, unavailable, message: "Removed in Swift 3. Please use Optional.unsafelyUnwrapped instead.")
-public func unsafeUnwrap<T>(_ nonEmpty: T?) -> T {
+/// Extract an object reference from an Any known to contain an object.
+internal func _unsafeDowncastToAnyObject(fromAny any: Any) -> AnyObject {
+  _sanityCheck(type(of: any) is AnyObject.Type
+               || type(of: any) is AnyObject.Protocol,
+               "Any expected to contain object reference")
+  // With a SIL instruction, we could more efficiently grab the object reference
+  // out of the Any's inline storage.
+
+  // On Linux, bridging isn't supported, so this is a force cast.
+#if _runtime(_ObjC)
+  return any as AnyObject
+#else
+  return any as! AnyObject
+#endif
+}
+
+// Game the SIL diagnostic pipeline by inlining this into the transparent
+// definitions below after the stdlib's diagnostic passes run, so that the
+// `staticReport`s don't fire while building the standard library, but do
+// fire if they ever show up in code that uses the standard library.
+@inline(__always)
+public // internal with availability
+func _trueAfterDiagnostics() -> Builtin.Int1 {
+  return true._value
+}
+
+/// Returns the dynamic type of a value.
+///
+/// You can use the `type(of:)` function to find the dynamic type of a value,
+/// particularly when the dynamic type is different from the static type. The
+/// *static type* of a value is the known, compile-time type of the value. The
+/// *dynamic type* of a value is the value's actual type at run-time, which
+/// can be nested inside its concrete type.
+///
+/// In the following code, the `count` variable has the same static and dynamic
+/// type: `Int`. When `count` is passed to the `printInfo(_:)` function,
+/// however, the `value` parameter has a static type of `Any` (the type
+/// declared for the parameter) and a dynamic type of `Int`.
+///
+///     func printInfo(_ value: Any) {
+///         let type = type(of: value)
+///         print("'\(value)' of type '\(type)'")
+///     }
+///
+///     let count: Int = 5
+///     printInfo(count)
+///     // '5' of type 'Int'
+///
+/// The dynamic type returned from `type(of:)` is a *concrete metatype*
+/// (`T.Type`) for a class, structure, enumeration, or other nonprotocol type
+/// `T`, or an *existential metatype* (`P.Type`) for a protocol or protocol
+/// composition `P`. When the static type of the value passed to `type(of:)`
+/// is constrained to a class or protocol, you can use that metatype to access
+/// initializers or other static members of the class or protocol.
+///
+/// For example, the parameter passed as `value` to the `printSmileyInfo(_:)`
+/// function in the example below is an instance of the `Smiley` class or one
+/// of its subclasses. The function uses `type(of:)` to find the dynamic type
+/// of `value`, which itself is an instance of the `Smiley.Type` metatype.
+///
+///     class Smiley {
+///         class var text: String {
+///             return ":)"
+///         }
+///     }
+///
+///     class EmojiSmiley : Smiley {
+///          override class var text: String {
+///             return "😀"
+///         }
+///     }
+///
+///     func printSmileyInfo(_ value: Smiley) {
+///         let smileyType = type(of: value)
+///         print("Smile!", smileyType.text)
+///     }
+///
+///     let emojiSmiley = EmojiSmiley()
+///     printSmileyInfo(emojiSmiley)
+///     // Smile! 😀
+///
+/// In this example, accessing the `text` property of the `smileyType` metatype
+/// retrieves the overridden value from the `EmojiSmiley` subclass, instead of
+/// the `Smiley` class's original definition.
+///
+/// Finding the Dynamic Type in a Generic Context
+/// =============================================
+///
+/// Normally, you don't need to be aware of the difference between concrete and
+/// existential metatypes, but calling `type(of:)` can yield unexpected
+/// results in a generic context with a type parameter bound to a protocol. In
+/// a case like this, where a generic parameter `T` is bound to a protocol
+/// `P`, the type parameter is not statically known to be a protocol type in
+/// the body of the generic function. As a result, `type(of:)` can only
+/// produce the concrete metatype `P.Protocol`.
+///
+/// The following example defines a `printGenericInfo(_:)` function that takes
+/// a generic parameter and declares the `String` type's conformance to a new
+/// protocol `P`. When `printGenericInfo(_:)` is called with a string that has
+/// `P` as its static type, the call to `type(of:)` returns `P.self` instead
+/// of `String.self` (the dynamic type inside the parameter).
+///
+///     func printGenericInfo<T>(_ value: T) {
+///         let type = type(of: value)
+///         print("'\(value)' of type '\(type)'")
+///     }
+///
+///     protocol P {}
+///     extension String: P {}
+///
+///     let stringAsP: P = "Hello!"
+///     printGenericInfo(stringAsP)
+///     // 'Hello!' of type 'P'
+///
+/// This unexpected result occurs because the call to `type(of: value)` inside
+/// `printGenericInfo(_:)` must return a metatype that is an instance of
+/// `T.Type`, but `String.self` (the expected dynamic type) is not an instance
+/// of `P.Type` (the concrete metatype of `value`). To get the dynamic type
+/// inside `value` in this generic context, cast the parameter to `Any` when
+/// calling `type(of:)`.
+///
+///     func betterPrintGenericInfo<T>(_ value: T) {
+///         let type = type(of: value as Any)
+///         print("'\(value)' of type '\(type)'")
+///     }
+///
+///     betterPrintGenericInfo(stringAsP)
+///     // 'Hello!' of type 'String'
+///
+/// - Parameter value: The value for which to find the dynamic type.
+/// - Returns: The dynamic type, which is a metatype instance.
+@_transparent
+@_semantics("typechecker.type(of:)")
+public func type<T, Metatype>(of value: T) -> Metatype {
+  // This implementation is never used, since calls to `Swift.type(of:)` are
+  // resolved as a special case by the type checker.
+  Builtin.staticReport(_trueAfterDiagnostics(), true._value,
+    ("internal consistency error: 'type(of:)' operation failed to resolve"
+     as StaticString).utf8Start._rawValue)
   Builtin.unreachable()
 }
+
+/// Allows a nonescaping closure to temporarily be used as if it were allowed
+/// to escape.
+///
+/// You can use this function to call an API that takes an escaping closure in
+/// a way that doesn't allow the closure to escape in practice. The examples
+/// below demonstrate how to use `withoutActuallyEscaping(_:do:)` in
+/// conjunction with two common APIs that use escaping closures: lazy
+/// collection views and asynchronous operations.
+///
+/// The following code declares an `allValues(in:match:)` function that checks
+/// whether all the elements in an array match a predicate. The function won't
+/// compile as written, because a lazy collection's `filter(_:)` method
+/// requires an escaping closure. The lazy collection isn't persisted, so the
+/// `predicate` closure won't actually escape the body of the function;
+/// nevertheless, it can't be used in this way.
+///
+///     func allValues(in array: [Int], match predicate: (Int) -> Bool) -> Bool {
+///         return array.lazy.filter { !predicate($0) }.isEmpty
+///     }
+///     // error: closure use of non-escaping parameter 'predicate'...
+///
+/// `withoutActuallyEscaping(_:do:)` provides a temporarily escapable copy of
+/// `predicate` that _can_ be used in a call to the lazy view's `filter(_:)`
+/// method. The second version of `allValues(in:match:)` compiles without
+/// error, with the compiler guaranteeing that the `escapablePredicate`
+/// closure doesn't last beyond the call to `withoutActuallyEscaping(_:do:)`.
+///
+///     func allValues(in array: [Int], match predicate: (Int) -> Bool) -> Bool {
+///         return withoutActuallyEscaping(predicate) { escapablePredicate in
+///             array.lazy.filter { !escapablePredicate($0) }.isEmpty
+///         }
+///     }
+///
+/// Asynchronous calls are another type of API that typically escape their
+/// closure arguments. The following code declares a
+/// `perform(_:simultaneouslyWith:)` function that uses a dispatch queue to
+/// execute two closures concurrently.
+///
+///     func perform(_ f: () -> Void, simultaneouslyWith g: () -> Void) {
+///         let queue = DispatchQueue(label: "perform", attributes: .concurrent)
+///         queue.async(execute: f)
+///         queue.async(execute: g)
+///         queue.sync(flags: .barrier) {}
+///     }
+///     // error: passing non-escaping parameter 'f'...
+///     // error: passing non-escaping parameter 'g'...
+///
+/// The `perform(_:simultaneouslyWith:)` function ends with a call to the
+/// `sync(flags:execute:)` method using the `.barrier` flag, which forces the
+/// function to wait until both closures have completed running before
+/// returning. Even though the barrier guarantees that neither closure will
+/// escape the function, the `async(execute:)` method still requires that the
+/// closures passed be marked as `@escaping`, so the first version of the
+/// function does not compile. To resolve these errors, you can use
+/// `withoutActuallyEscaping(_:do:)` to get copies of `f` and `g` that can be
+/// passed to `async(execute:)`.
+///
+///     func perform(_ f: () -> Void, simultaneouslyWith g: () -> Void) {
+///         withoutActuallyEscaping(f) { escapableF in
+///             withoutActuallyEscaping(g) { escapableG in
+///                 let queue = DispatchQueue(label: "perform", attributes: .concurrent)
+///                 queue.async(execute: escapableF)
+///                 queue.async(execute: escapableG)
+///                 queue.sync(flags: .barrier) {}
+///             }
+///         }
+///     }
+///
+/// - Important: The escapable copy of `closure` passed to `body` is only valid
+///   during the call to `withoutActuallyEscaping(_:do:)`. It is undefined
+///   behavior for the escapable closure to be stored, referenced, or executed
+///   after the function returns.
+///
+/// - Parameters:
+///   - closure: A nonescaping closure value that is made escapable for the
+///     duration of the execution of the `body` closure. If `body` has a
+///     return value, that value is also used as the return value for the
+///     `withoutActuallyEscaping(_:do:)` function.
+///   - body: A closure that is executed immediately with an escapable copy of
+///     `closure` as its argument.
+/// - Returns: The return value, if any, of the `body` closure.
+@_transparent
+@_semantics("typechecker.withoutActuallyEscaping(_:do:)")
+public func withoutActuallyEscaping<ClosureType, ResultType>(
+  _ closure: ClosureType,
+  do body: (_ escapingClosure: ClosureType) throws -> ResultType
+) rethrows -> ResultType {
+  // This implementation is never used, since calls to
+  // `Swift.withoutActuallyEscaping(_:do:)` are resolved as a special case by
+  // the type checker.
+  Builtin.staticReport(_trueAfterDiagnostics(), true._value,
+    ("internal consistency error: 'withoutActuallyEscaping(_:do:)' operation failed to resolve"
+     as StaticString).utf8Start._rawValue)
+  Builtin.unreachable()
+}
+
+@_transparent
+@_semantics("typechecker._openExistential(_:do:)")
+public func _openExistential<ExistentialType, ContainedType, ResultType>(
+  _ existential: ExistentialType,
+  do body: (_ escapingClosure: ContainedType) throws -> ResultType
+) rethrows -> ResultType {
+  // This implementation is never used, since calls to
+  // `Swift._openExistential(_:do:)` are resolved as a special case by
+  // the type checker.
+  Builtin.staticReport(_trueAfterDiagnostics(), true._value,
+    ("internal consistency error: '_openExistential(_:do:)' operation failed to resolve"
+     as StaticString).utf8Start._rawValue)
+  Builtin.unreachable()
+}
+

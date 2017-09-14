@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 // ---------------------------------------------------------------------------
 // Mark function's return value as discardable and silence warning
@@ -23,6 +23,9 @@ func testGlobalFunctions() -> [Int] {
   return f2() // okay
 }
 
+attr_discardableResult.f1()
+attr_discardableResult.f2() // expected-warning {{result of call to 'f2()' is unused}}
+
 class C1 {
   @discardableResult
   static func f1Static() -> Int { }
@@ -41,6 +44,11 @@ class C1 {
   func f1() -> Int { }
 
   func f2() -> Int { }
+
+  @discardableResult
+  func f1Optional() -> Int? { }
+
+  func f2Optional() -> Int? { }
 
   @discardableResult
   func me() -> Self { return self }
@@ -68,6 +76,10 @@ func testFunctionsInClass(c1 : C1, c2: C2) {
   c1.f2()           // expected-warning {{result of call to 'f2()' is unused}}
   _ = c1.f2()       // okay
 
+  c1.f1Optional()   // okay
+  c1.f2Optional()   // expected-warning {{result of call to 'f2Optional()' is unused}}
+  _ = c1.f2Optional() // okay
+
   c1.me()           // okay
   c2.me()           // okay
 
@@ -91,6 +103,11 @@ struct S1 {
   func f1() -> Int { }
 
   func f2() -> Int { }
+
+  @discardableResult
+  func f1Optional() -> Int? { }
+
+  func f2Optional() -> Int? { }
 }
 
 func testFunctionsInStruct(s1 : S1) {
@@ -106,6 +123,10 @@ func testFunctionsInStruct(s1 : S1) {
   s1.f1()           // okay
   s1.f2()           // expected-warning {{result of call to 'f2()' is unused}}
   _ = s1.f2()       // okay
+
+  s1.f1Optional()   // okay
+  s1.f2Optional()   // expected-warning {{result of call to 'f2Optional()' is unused}}
+  _ = s1.f2Optional() // okay
 }
 
 protocol P1 {
@@ -122,10 +143,10 @@ func testFunctionsInExistential(p1 : P1) {
 }
 
 let x = 4
-"Hello \(x+1) world"  // expected-warning {{expression of type 'String' is unused}}
+"Hello \(x+1) world"  // expected-warning {{string literal is unused}}
 
 func f(a : () -> Int) {
-  42  // expected-warning {{result of call to 'init(_builtinIntegerLiteral:)' is unused}}
+  42  // expected-warning {{integer literal is unused}}
   
   4 + 5 // expected-warning {{result of operator '+' is unused}}
   a() // expected-warning {{result of call is unused, but produces 'Int'}}
@@ -138,3 +159,29 @@ class X {
   @objc
   func h() -> Int { }
 }
+
+func testOptionalChaining(c1: C1?, s1: S1?) {
+  c1?.f1()         // okay
+  c1!.f1()         // okay
+  c1?.f1Optional() // okay
+  c1!.f1Optional() // okay
+  c1?.f2()         // expected-warning {{result of call to 'f2()' is unused}}
+  c1!.f2()         // expected-warning {{result of call to 'f2()' is unused}}
+  c1?.f2Optional() // expected-warning {{result of call to 'f2Optional()' is unused}}
+  c1!.f2Optional() // expected-warning {{result of call to 'f2Optional()' is unused}}
+
+  s1?.f1()         // okay
+  s1!.f1()         // okay
+  s1?.f1Optional() // okay
+  s1!.f1Optional() // okay
+  s1?.f2()         // expected-warning {{result of call to 'f2()' is unused}}
+  s1!.f2()         // expected-warning {{result of call to 'f2()' is unused}}
+  s1?.f2Optional() // expected-warning {{result of call to 'f2Optional()' is unused}}
+  s1!.f2Optional() // expected-warning {{result of call to 'f2Optional()' is unused}}
+}
+
+@discardableResult func SR2948 (_ closure: @escaping ()->()) -> (()->()) {
+  closure()
+  return closure
+}
+SR2948({}) // okay

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -57,6 +57,10 @@ extern int autolink_extract_main(ArrayRef<const char *> Args, const char *Argv0,
 extern int modulewrap_main(ArrayRef<const char *> Args, const char *Argv0,
                            void *MainAddr);
 
+/// Run 'swift-format'
+extern int swift_format_main(ArrayRef<const char *> Args, const char *Argv0,
+                             void *MainAddr);
+
 /// Determine if the given invocation should run as a subcommand.
 ///
 /// \param ExecName The name of the argv[0] we were invoked as.
@@ -90,9 +94,9 @@ static bool shouldRunAsSubcommand(StringRef ExecName,
   StringRef Subcommand = Args[1];
   Args.erase(&Args[1]);
 
-  // If the subcommand is one of the "built-in" 'repl' or 'run', then use the
+  // If the subcommand is the "built-in" 'repl', then use the
   // normal driver.
-  if (Subcommand == "repl" || Subcommand == "run")
+  if (Subcommand == "repl")
     return false;
 
   // Form the subcommand name.
@@ -150,7 +154,7 @@ int main(int argc_, const char **argv_) {
   }
 
   // Handle integrated tools.
-  if (argv.size() > 1){
+  if (argv.size() > 1) {
     StringRef FirstArg(argv[1]);
     if (FirstArg == "-frontend") {
       return performFrontend(llvm::makeArrayRef(argv.data()+2,
@@ -180,6 +184,10 @@ int main(int argc_, const char **argv_) {
   switch (TheDriver.getDriverKind()) {
   case Driver::DriverKind::AutolinkExtract:
     return autolink_extract_main(
+      TheDriver.getArgsWithoutProgramNameAndDriverMode(argv),
+      argv[0], (void *)(intptr_t)getExecutablePath);
+  case Driver::DriverKind::SwiftFormat:
+    return swift_format_main(
       TheDriver.getArgsWithoutProgramNameAndDriverMode(argv),
       argv[0], (void *)(intptr_t)getExecutablePath);
   default:

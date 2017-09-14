@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift -I %S/Inputs -enable-source-import
+// RUN: %target-typecheck-verify-swift -I %S/Inputs -enable-source-import
 
 import diag_values_of_module_type_foo
 
@@ -70,8 +70,8 @@ func goodTest3() -> Swift.Int {}
 
 func goodTest4<T : diag_values_of_module_type_foo.SomeProtocol>(_: T) {}
 
-func goodTest5<T : diag_values_of_module_type_foo.SomeProtocol
-               where T.Foo == Swift.Int>(_: T) {}
+func goodTest5<T : diag_values_of_module_type_foo.SomeProtocol>(_: T)
+  where T.Foo == Swift.Int {}
 
 //===--- Disallowed uses of module names.
 

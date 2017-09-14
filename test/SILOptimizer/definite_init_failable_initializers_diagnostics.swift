@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -emit-sil -disable-objc-attr-requires-foundation-module -verify %s
+// RUN: %target-swift-frontend -emit-sil -enable-sil-ownership -disable-objc-attr-requires-foundation-module -verify %s
 
 // High-level tests that DI rejects certain invalid idioms for early
 // return from initializers.
@@ -91,7 +91,7 @@ class ErrantClass : ErrantBaseClass {
       something(self) // expected-error {{'self' used inside 'catch' block reachable from self.init call}}
 
       // FIXME: not diagnosed
-      something(self.dynamicType)
+      something(type(of: self))
 
       throw e
     }

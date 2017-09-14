@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -95,7 +95,7 @@ std::string sourcekitd::getRuntimeLibPath() {
 }
 
 void sourcekitd::set_interrupted_connection_handler(
-                          sourcekitd_interrupted_connection_handler_t handler) {
+                          llvm::function_ref<void()> handler) {
 }
 
 //===----------------------------------------------------------------------===//
@@ -123,7 +123,7 @@ void sourcekitd_send_request(sourcekitd_object_t req,
   sourcekitd_request_retain(req);
   receiver = Block_copy(receiver);
   WorkQueue::dispatchConcurrent([=]{
-    sourcekitd::handleRequest(req, [&](sourcekitd_response_t resp) {
+    sourcekitd::handleRequest(req, [=](sourcekitd_response_t resp) {
       // The receiver accepts ownership of the response.
       receiver(resp);
       Block_release(receiver);

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -46,7 +46,7 @@ def get_slice_doc_comment(Self):
 ///
 /// 1) Create a slice of the `absences` array that holds the second half of the
 ///    days.
-/// 2) Use the `max(isOrderedBefore:)` method to determine the index of the day
+/// 2) Use the `max(by:)` method to determine the index of the day
 ///    with the most absences.
 /// 3) Print the result using the index found in step 2 on the original
 ///    `absences` array.
@@ -54,7 +54,7 @@ def get_slice_doc_comment(Self):
 /// Here's an implementation of those steps:
 ///
 ///     let secondHalf = absences.suffix(absences.count / 2)
-///     if let i = secondHalf.indices.max(isOrderedBefore: { secondHalf[$0] < secondHalf[$1] }) {
+///     if let i = secondHalf.indices.max(by: { secondHalf[$0] < secondHalf[$1] }) {
 ///         print("Highest second-half absences: \(absences[i])")
 ///     }
 ///     // Prints "Highest second-half absences: 3"
@@ -86,21 +86,22 @@ def get_slice_doc_comment(Self):
 """ % {"SliceType": Self}
 }%
 
-// FIXME(ABI)(compiler limitation): There should be just one slice type
+// FIXME(ABI)#66 (Conditional Conformance): There should be just one slice type
 // that has conditional conformances to `BidirectionalCollection`,
 // `RandomAccessCollection`, `RangeReplaceableCollection`, and
 // `MutableCollection`.
+// rdar://problem/21935030
 
 % for Traversal in TRAVERSALS:
 %   for Mutable in [ False, True ]:
 %     for RangeReplaceable in [ False, True ]:
 %       Self = sliceTypeName(traversal=Traversal, mutable=Mutable, rangeReplaceable=RangeReplaceable)
-%       BaseRequirements = [collectionForTraversal(Traversal).replace('Collection', 'Indexable')]
+%       BaseRequirements = ['_' + collectionForTraversal(Traversal).replace('Collection', 'Indexable')]
 %       if Mutable:
-%         BaseRequirements.append('MutableIndexable')
+%         BaseRequirements.append('_MutableIndexable')
 %       if RangeReplaceable:
-%         BaseRequirements.append('RangeReplaceableIndexable')
-%       BaseRequirements = 'protocol<' + ', '.join(BaseRequirements) + '>'
+%         BaseRequirements.append('_RangeReplaceableIndexable')
+%       BaseRequirements = ' & '.join(BaseRequirements)
 %       SelfProtocols = ', '.join(protocolsForCollectionFeatures(traversal=Traversal, mutable=Mutable, rangeReplaceable=RangeReplaceable))
 
 ${get_slice_doc_comment(Self)}
@@ -130,7 +131,7 @@ public struct ${Self}<Base : ${BaseRequirements}>
     return _endIndex
   }
 
-  public subscript(index: Index) -> Base._Element {
+  public subscript(index: Index) -> Base.Element {
     get {
       _failEarlyRangeCheck(index, bounds: startIndex..<endIndex)
       return _base[index]
@@ -160,7 +161,7 @@ public struct ${Self}<Base : ${BaseRequirements}>
 %     end
   }
 
-  // FIXME(ABI)(compiler limitation):
+  // FIXME(ABI)#67 (Associated Types with where clauses):
   //
   //   public typealias Indices = Base.Indices
   //   public var indices: Indices { ... }
@@ -222,7 +223,7 @@ public struct ${Self}<Base : ${BaseRequirements}>
     self._endIndex = _base.endIndex
   }
 
-  public init(repeating repeatedValue: Base._Element, count: Int) {
+  public init(repeating repeatedValue: Base.Element, count: Int) {
     self._base = Base(repeating: repeatedValue, count: count)
     self._startIndex = _base.startIndex
     self._endIndex = _base.endIndex
@@ -231,7 +232,7 @@ public struct ${Self}<Base : ${BaseRequirements}>
   public init<S>(_ elements: S)
     where
     S : Sequence,
-    S.Iterator.Element == Base._Element {
+    S.Element == Base.Element {
 
     self._base = Base(elements)
     self._startIndex = _base.startIndex
@@ -242,7 +243,7 @@ public struct ${Self}<Base : ${BaseRequirements}>
     _ subRange: Range<Index>, with newElements: C
   ) where
     C : Collection,
-    C.Iterator.Element == Base._Element {
+    C.Element == Base.Element {
 
     // FIXME: swift-3-indexing-model: range check.
 %     if Traversal == 'Forward':
@@ -251,7 +252,7 @@ public struct ${Self}<Base : ${BaseRequirements}>
     let newSliceCount: IndexDistance =
       _base.distance(from: _startIndex, to: subRange.lowerBound)
       + _base.distance(from: subRange.upperBound, to: _endIndex)
-      + numericCast(newElements.count)
+      + (numericCast(newElements.count) as IndexDistance)
     _base.replaceSubrange(subRange, with: newElements)
     _startIndex = _base.index(_base.startIndex, offsetBy: sliceOffset)
     _endIndex = _base.index(_startIndex, offsetBy: newSliceCount)
@@ -260,7 +261,7 @@ public struct ${Self}<Base : ${BaseRequirements}>
       let newSliceCount: IndexDistance =
         _base.distance(from: _startIndex, to: subRange.lowerBound)
         + _base.distance(from: subRange.upperBound, to: _endIndex)
-        + numericCast(newElements.count)
+        + (numericCast(newElements.count) as IndexDistance)
       _base.replaceSubrange(subRange, with: newElements)
       _startIndex = _base.startIndex
       _endIndex = _base.index(_startIndex, offsetBy: newSliceCount)
@@ -269,7 +270,7 @@ public struct ${Self}<Base : ${BaseRequirements}>
       let lastValidIndex = _base.index(before: subRange.lowerBound)
       let newEndIndexOffset =
         _base.distance(from: subRange.upperBound, to: _endIndex)
-        + numericCast(newElements.count) + 1
+        + (numericCast(newElements.count) as IndexDistance) + 1
       _base.replaceSubrange(subRange, with: newElements)
       if shouldUpdateStartIndex {
         _startIndex = _base.index(after: lastValidIndex)
@@ -279,7 +280,7 @@ public struct ${Self}<Base : ${BaseRequirements}>
 %     end
   }
 
-  public mutating func insert(_ newElement: Base._Element, at i: Index) {
+  public mutating func insert(_ newElement: Base.Element, at i: Index) {
     // FIXME: swift-3-indexing-model: range check.
 %     if Traversal == 'Forward':
     let sliceOffset: IndexDistance =
@@ -310,21 +311,21 @@ public struct ${Self}<Base : ${BaseRequirements}>
   public mutating func insert<S>(contentsOf newElements: S, at i: Index)
     where
     S : Collection,
-    S.Iterator.Element == Base._Element {
+    S.Element == Base.Element {
 
     // FIXME: swift-3-indexing-model: range check.
 %     if Traversal == 'Forward':
     let sliceOffset: IndexDistance =
       _base.distance(from: _base.startIndex, to: _startIndex)
     let newSliceCount: IndexDistance =
-      count + numericCast(newElements.count)
+      count + (numericCast(newElements.count) as IndexDistance)
     _base.insert(contentsOf: newElements, at: i)
     _startIndex = _base.index(_base.startIndex, offsetBy: sliceOffset)
     _endIndex = _base.index(_startIndex, offsetBy: newSliceCount)
 %     else:
     if i == _base.startIndex {
       let newSliceCount: IndexDistance =
-        count + numericCast(newElements.count)
+        count + (numericCast(newElements.count) as IndexDistance)
       _base.insert(contentsOf: newElements, at: i)
       _startIndex = _base.startIndex
       _endIndex = _base.index(_startIndex, offsetBy: newSliceCount)
@@ -333,7 +334,7 @@ public struct ${Self}<Base : ${BaseRequirements}>
       let lastValidIndex = _base.index(before: i)
       let newEndIndexOffset =
         _base.distance(from: i, to: _endIndex)
-        + numericCast(newElements.count) + 1
+        + (numericCast(newElements.count) as IndexDistance) + 1
       _base.insert(contentsOf: newElements, at: i)
       if shouldUpdateStartIndex {
         _startIndex = _base.index(after: lastValidIndex)
@@ -343,7 +344,7 @@ public struct ${Self}<Base : ${BaseRequirements}>
 %     end
   }
 
-  public mutating func remove(at i: Index) -> Base._Element {
+  public mutating func remove(at i: Index) -> Base.Element {
     // FIXME: swift-3-indexing-model: range check.
 %     if Traversal == 'Forward':
     let sliceOffset: IndexDistance =
@@ -395,7 +396,7 @@ public struct ${Self}<Base : ${BaseRequirements}>
     } else {
       let shouldUpdateStartIndex = bounds.lowerBound == _startIndex
       let lastValidIndex = _base.index(before: bounds.lowerBound)
-      let newEndIndexOffset =
+      let newEndIndexOffset: Base.IndexDistance =
         _base.distance(from: bounds.lowerBound, to: _endIndex)
         - _base.distance(from: bounds.lowerBound, to: bounds.upperBound)
         + 1
@@ -421,6 +422,10 @@ public struct ${Self}<Base : ${BaseRequirements}>
   ///     print(Array(subSequence))
   ///     // Prints "[5, 6, 7, 8, 9]"
   ///
+  /// In this example, the expression `singleDigits.dropFirst(5))` is
+  /// equivalent to calling this initializer with `singleDigits` and a
+  /// range covering the last five items of `singleDigits.indices`.
+  ///
   /// - Parameters:
   ///   - base: The collection to create a view into.
   ///   - bounds: The range of indices to allow access to in the new slice.
@@ -437,6 +442,23 @@ public struct ${Self}<Base : ${BaseRequirements}>
 %     end
 
   /// The underlying collection of the slice.
+  ///
+  /// You can use a slice's `base` property to access its base collection. The
+  /// following example declares `singleDigits`, a range of single digit
+  /// integers, and then drops the first element to create a slice of that
+  /// range, `singleNonZeroDigits`. The `base` property of the slice is equal
+  /// to `singleDigits`.
+  ///
+  ///     let singleDigits = 0..<10
+  ///     let singleNonZeroDigits = singleDigits.dropFirst()
+  ///     // singleNonZeroDigits is a RandomAccessSlice<CountableRange<Int>>
+  ///
+  ///     print(singleNonZeroDigits.count)
+  ///     // Prints "9"
+  ///     prints(singleNonZeroDigits.base.count)
+  ///     // Prints "10"
+  ///     print(singleDigits == singleNonZeroDigits.base)
+  ///     // Prints "true"
   public var base: Base {
     return _base
   }

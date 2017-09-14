@@ -1,12 +1,12 @@
-//===--- PrintForDebugger.swift -------------------------------------------===//
+//===--- DebuggerSupport.swift --------------------------------------------===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -38,20 +38,34 @@ public enum _DebuggerSupport {
     }
   }
 
-  internal static func asObjectIdentifier(_ value: Any) -> ObjectIdentifier? {
-    if let ao = value as? AnyObject {
-      return ObjectIdentifier(ao)
-    } else {
-      return nil
+  internal static func isClass(_ value: Any) -> Bool {
+    if let _ = type(of: value) as? AnyClass {
+      return true
     }
+    return false
+  }
+  
+  internal static func checkValue<T>(
+    _ value: Any,
+    ifClass: (AnyObject) -> T,
+    otherwise: () -> T
+  ) -> T {
+    if isClass(value) {
+      return ifClass(_unsafeDowncastToAnyObject(fromAny: value))
+    }
+    return otherwise()
+  }
+
+  internal static func asObjectIdentifier(_ value: Any) -> ObjectIdentifier? {
+    return checkValue(value,
+      ifClass: { return ObjectIdentifier($0) },
+      otherwise: { return nil })
   }
 
   internal static func asNumericValue(_ value: Any) -> Int {
-    if let ao = value as? AnyObject {
-      return unsafeBitCast(ao, to: Int.self)
-    } else {
-      return 0
-    }
+    return checkValue(value,
+      ifClass: { return unsafeBitCast($0, to: Int.self) },
+      otherwise: { return 0 })
   }
 
   internal static func asStringRepresentation(
@@ -77,7 +91,11 @@ public enum _DebuggerSupport {
       case .set:
         fallthrough
       case .tuple:
-        return "\(Int(mirror.children.count)) elements"
+        if count == 1 {
+          return "1 element"
+        } else {
+          return "\(count) elements"
+        }
       case .`struct`:
         fallthrough
       case .`enum`:
@@ -101,7 +119,7 @@ public enum _DebuggerSupport {
             return csc.description
           }
           // for a Class with no custom summary, mimic the Foundation default
-          return "<\(x.dynamicType): 0x\(String(asNumericValue(x), radix: 16, uppercase: false))>"
+          return "<\(type(of: x)): 0x\(String(asNumericValue(x), radix: 16, uppercase: false))>"
         } else {
           // but if I can't provide a value, just use the type anyway
           return "\(mirror.subjectType)"
@@ -138,7 +156,7 @@ public enum _DebuggerSupport {
     }
   }
 
-  internal static func printForDebuggerImpl<StreamType : OutputStream>(
+  internal static func printForDebuggerImpl<StreamType : TextOutputStream>(
     value: Any?,
     mirror: Mirror,
     name: String?,
@@ -182,7 +200,7 @@ public enum _DebuggerSupport {
     }
 
     let count = Int(mirror.children.count)
-    let bullet = isRoot && (count == 0 || willExpand == false) ? ""
+    let bullet = isRoot && (count == 0 || !willExpand) ? ""
       : count == 0    ? "- "
       : maxDepth <= 0 ? "▹ " : "▿ "
     print("\(bullet)", terminator: "", to: &targetStream)
@@ -265,6 +283,10 @@ public enum _DebuggerSupport {
     }
   }
 
+  // LLDB uses this function in expressions, and if it is inlined the resulting
+  // LLVM IR is enormous.  As a result, to improve LLDB performance we have made
+  // this stdlib_binary_only, which prevents inlining.
+  @_semantics("stdlib_binary_only")
   public static func stringForPrintObject(_ value: Any) -> String {
     var maxItemCounter = Int.max
     var refs = Set<ObjectIdentifier>()

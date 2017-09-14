@@ -2,30 +2,30 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 import SwiftShims
 
-// TODO: API review
 /// A type representing an error value that can be thrown.
 ///
-/// Any type that declares conformance to `Error` can be used to
-/// represent an error in Swift's error handling system. Because
-/// `Error` has no requirements of its own, you can declare
-/// conformance on any custom type you create.
+/// Any type that declares conformance to the `Error` protocol can be used to
+/// represent an error in Swift's error handling system. Because the `Error`
+/// protocol has no requirements of its own, you can declare conformance on
+/// any custom type you create.
 ///
 /// Using Enumerations as Errors
 /// ============================
 ///
 /// Swift's enumerations are well suited to represent simple errors. Create an
-/// enumeration that conforms to `Error` with a case for each possible
-/// error. If there are additional details about the error that could be
-/// helpful for recovery, use associated values to include that information.
+/// enumeration that conforms to the `Error` protocol with a case for each
+/// possible error. If there are additional details about the error that could
+/// be helpful for recovery, use associated values to include that
+/// information.
 ///
 /// The following example shows an `IntParsingError` enumeration that captures
 /// two different kinds of errors that can occur when parsing an integer from
@@ -112,12 +112,27 @@ import SwiftShims
 public protocol Error {
   var _domain: String { get }
   var _code: Int { get }
+
+  // Note: _userInfo is always an NSDictionary, but we cannot use that type here
+  // because the standard library cannot depend on Foundation. However, the
+  // underscore implies that we control all implementations of this requirement.
   var _userInfo: AnyObject? { get }
+
+#if _runtime(_ObjC)
+  func _getEmbeddedNSError() -> AnyObject?
+#endif
 }
 
 #if _runtime(_ObjC)
-// Helper functions for the C++ runtime to have easy access to domain,
-// code, and userInfo as Objective-C values.
+extension Error {
+  /// Default implementation: there is no embedded NSError.
+  public func _getEmbeddedNSError() -> AnyObject? { return nil }
+}
+#endif
+
+#if _runtime(_ObjC)
+// Helper functions for the C++ runtime to have easy access to embedded error,
+// domain, code, and userInfo as Objective-C values.
 @_silgen_name("swift_stdlib_getErrorDomainNSString")
 public func _stdlib_getErrorDomainNSString<T : Error>(_ x: UnsafePointer<T>)
 -> AnyObject {
@@ -134,11 +149,24 @@ public func _stdlib_getErrorCode<T : Error>(_ x: UnsafePointer<T>) -> Int {
 @_silgen_name("swift_stdlib_getErrorUserInfoNSDictionary")
 public func _stdlib_getErrorUserInfoNSDictionary<T : Error>(_ x: UnsafePointer<T>)
 -> AnyObject? {
-  return x.pointee._userInfo
+  return x.pointee._userInfo.map { $0 as AnyObject }
+}
+
+@_silgen_name("swift_stdlib_getErrorEmbeddedNSErrorIndirect")
+public func _stdlib_getErrorEmbeddedNSErrorIndirect<T : Error>(
+    _ x: UnsafePointer<T>) -> AnyObject? {
+  return x.pointee._getEmbeddedNSError()
+}
+
+/// FIXME: Quite unfortunate to have both of these.
+@_silgen_name("swift_stdlib_getErrorEmbeddedNSError")
+public func _stdlib_getErrorEmbeddedNSError<T : Error>(_ x: T)
+-> AnyObject? {
+  return x._getEmbeddedNSError()
 }
 
 @_silgen_name("swift_stdlib_getErrorDefaultUserInfo")
-public func _stdlib_getErrorDefaultUserInfo(_ error: Error) -> AnyObject?
+public func _stdlib_getErrorDefaultUserInfo<T: Error>(_ error: T) -> AnyObject?
 
 // Known function for the compiler to use to coerce `Error` instances
 // to `NSError`.
@@ -159,16 +187,17 @@ public func _errorInMain(_ error: Error) {
   fatalError("Error raised at top level: \(String(reflecting: error))")
 }
 
-@available(*, unavailable, renamed: "Error")
-public typealias ErrorType = Error
-
-@available(*, unavailable, renamed: "Error")
-public typealias ErrorProtocol = Error
-
+/// Runtime function to determine the default code for an Error-conforming type.
+@_silgen_name("swift_getDefaultErrorCode")
+public func _swift_getDefaultErrorCode<T : Error>(_ x: T) -> Int
 
 extension Error {
+  public var _code: Int {
+    return _swift_getDefaultErrorCode(self)
+  }
+
   public var _domain: String {
-    return String(reflecting: self.dynamicType)
+    return String(reflecting: type(of: self))
   }
 
   public var _userInfo: AnyObject? {
@@ -177,5 +206,19 @@ extension Error {
 #else
     return nil
 #endif
+  }
+}
+
+extension Error where Self: RawRepresentable, Self.RawValue: SignedInteger {
+  // The error code of Error with integral raw values is the raw value.
+  public var _code: Int {
+    return numericCast(self.rawValue)
+  }
+}
+
+extension Error where Self: RawRepresentable, Self.RawValue: UnsignedInteger {
+  // The error code of Error with integral raw values is the raw value.
+  public var _code: Int {
+    return numericCast(self.rawValue)
   }
 }

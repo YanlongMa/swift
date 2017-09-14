@@ -1,8 +1,18 @@
 #import <Foundation.h>
 
+#define _CF_TYPED_ENUM __attribute__((swift_wrapper(enum)))
+#define NS_STRING_ENUM _CF_TYPED_ENUM
+#define NS_SWIFT_NAME(Name) __attribute__((swift_name(#Name)))
+
+typedef NSString * GenericOption NS_STRING_ENUM;
+
+GenericOption const GenericOptionMultithreaded NS_SWIFT_NAME(multithreaded);
+
+
 @interface GenericClass<T> : NSObject
 - (id)initWithThing:(T)thing;
 - (id)initWithArrayOfThings:(NSArray<T> *__nonnull)things;
+- (id)initWithOptions:(nullable NSDictionary<GenericOption, id> *)options;
 - (void)dealloc;
 - (__nullable T)thing;
 - (int)count;
@@ -54,7 +64,9 @@ void takeGenericClass(__nullable GenericClass<NSString *> *thing);
 
 - (Animal *_Nonnull)objectAtIndexedSubscript:(NSInteger)i;
 - (void)setObject:(Animal *_Nonnull)x atIndexedSubscript:(NSInteger)i;
+@end
 
+@interface PettableOverextendedMetaphor: NSObject <Pettable>
 @end
 
 @protocol Fungible
@@ -72,7 +84,31 @@ void takeGenericClass(__nullable GenericClass<NSString *> *thing);
 @interface PettableAnimalContainer<T: Animal<Pettable> *> : NSObject
 @end
 
+@interface FungibleAnimalContainer<T: Animal<Fungible> *> : NSObject
+@end
+
 @interface TestConstrainedTypeParam<T> : NSObject
 - (void)doThing:(__nonnull T<Pettable>)thing;
 @end
 
+typedef id <Fungible> FungibleObject;
+
+@interface Panda
+
+// Unqualified reference to generic type
+
++ (AnimalContainer *)getContainer;
++ (FungibleAnimalContainer *)getFungibleContainer;
+
+@end
+
+@interface First<__covariant T> : NSObject
+@end
+
+@interface Second<__covariant T> : First<T>
+@end
+
+@class Third;
+
+@interface Third : Second<Third *>
+@end

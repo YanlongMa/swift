@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 ///
@@ -18,6 +18,7 @@
 
 #include "swift/AST/Comment.h"
 #include "swift/AST/Decl.h"
+#include "swift/AST/Types.h"
 #include "swift/AST/PrettyStackTrace.h"
 #include "swift/AST/RawComment.h"
 #include "swift/Markup/Markup.h"
@@ -260,12 +261,20 @@ bool extractSimpleField(
     ParagraphText->setLiteralContent(Remainder);
     auto Field = swift::markup::createSimpleField(MC, Tag, ItemChildren);
 
-    if (auto RF = dyn_cast<swift::markup::ReturnsField>(Field))
+    if (auto RF = dyn_cast<swift::markup::ReturnsField>(Field)) {
       Parts.ReturnsField = RF;
-    else if (auto TF = dyn_cast<swift::markup::ThrowsField>(Field))
+    } else if (auto TF = dyn_cast<swift::markup::ThrowsField>(Field)) {
       Parts.ThrowsField = TF;
-    else
+    } else if (auto TF = dyn_cast<swift::markup::TagField>(Field)) {
+      llvm::SmallString<64> Scratch;
+      llvm::raw_svector_ostream OS(Scratch);
+      printInlinesUnder(TF, OS);
+      Parts.Tags.insert(MC.allocateCopy(OS.str()));
+    } else if (auto LKF = dyn_cast<markup::LocalizationKeyField>(Field)) {
+      Parts.LocalizationKeyField = LKF;
+    } else {
       BodyNodes.push_back(Field);
+    }
   }
 
   if (NormalItems.size() != Children.size())
@@ -274,8 +283,8 @@ bool extractSimpleField(
   return NormalItems.size() == 0;
 }
 
-static swift::markup::CommentParts
-extractCommentParts(swift::markup::MarkupContext &MC,
+swift::markup::CommentParts
+swift::extractCommentParts(swift::markup::MarkupContext &MC,
                     swift::markup::MarkupASTNode *Node) {
 
   swift::markup::CommentParts Parts;
@@ -392,6 +401,44 @@ getAnyBaseClassDocComment(swift::markup::MarkupContext &MC,
   return None;
 }
 
+static Optional<DocComment *>
+getProtocolRequirementDocComment(swift::markup::MarkupContext &MC,
+                                 const ProtocolDecl *ProtoExt,
+                                 const Decl *D) {
+
+  auto getSingleRequirementWithNonemptyDoc = [](const ProtocolDecl *P,
+                                                const ValueDecl *VD)
+    -> const ValueDecl * {
+      SmallVector<ValueDecl *, 2> Members;
+      P->lookupQualified(P->getDeclaredType(), VD->getFullName(),
+                         NLOptions::NL_ProtocolMembers,
+                         /*typeResolver=*/nullptr, Members);
+    SmallVector<const ValueDecl *, 1> ProtocolRequirements;
+    for (auto Member : Members)
+      if (isa<ProtocolDecl>(Member->getDeclContext()) &&
+          Member->isProtocolRequirement())
+        ProtocolRequirements.push_back(Member);
+
+    if (ProtocolRequirements.size() == 1) {
+      auto Requirement = ProtocolRequirements.front();
+      if (!Requirement->getRawComment().isEmpty())
+        return Requirement;
+    }
+
+    return nullptr;
+  };
+
+  if (const auto *VD = dyn_cast<ValueDecl>(D)) {
+    SmallVector<const ValueDecl *, 4> RequirementsWithDocs;
+    if (auto Requirement = getSingleRequirementWithNonemptyDoc(ProtoExt, VD))
+      RequirementsWithDocs.push_back(Requirement);
+
+    if (RequirementsWithDocs.size() == 1)
+      return getSingleDocComment(MC, RequirementsWithDocs.front());
+  }
+  return None;
+}
+
 Optional<DocComment *>
 swift::getCascadingDocComment(swift::markup::MarkupContext &MC, const Decl *D) {
   auto Doc = getSingleDocComment(MC, D);
@@ -404,8 +451,9 @@ swift::getCascadingDocComment(swift::markup::MarkupContext &MC, const Decl *D) {
     if (auto BaseClassDoc = getAnyBaseClassDocComment(MC, CD, D))
       return BaseClassDoc;
 
-  // FIXME: Look at protocol requirement declarations if a protocol
-  // extension implementation doesn't have a doc comment.
+  if (const auto *PE = D->getDeclContext()->getAsProtocolExtensionContext())
+    if (auto ReqDoc = getProtocolRequirementDocComment(MC, PE, D))
+      return ReqDoc;
 
   return None;
 }

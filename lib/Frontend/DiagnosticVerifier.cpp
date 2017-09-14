@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -60,7 +60,7 @@ namespace {
     }
     
   };
-}
+} // end anonymous namespace
 
 static std::string getDiagKindString(llvm::SourceMgr::DiagKind Kind) {
   switch (Kind) {
@@ -68,6 +68,8 @@ static std::string getDiagKindString(llvm::SourceMgr::DiagKind Kind) {
   case llvm::SourceMgr::DK_Warning: return "warning";
   case llvm::SourceMgr::DK_Note: return "note";
   }
+
+  llvm_unreachable("Unhandled DiagKind in switch.");
 }
 
 
@@ -90,6 +92,9 @@ namespace {
     /// got all of the expected diagnostics and check to see if there were any
     /// unexpected ones.
     bool verifyFile(unsigned BufferID, bool autoApplyFixes);
+
+    /// diagnostics for '<unknown>:0' should be considered as unexpected.
+    bool verifyUnknown();
 
     /// If there are any -verify errors (e.g. differences between expectations
     /// and actual diagnostics produced), apply fixits to the original source
@@ -171,28 +176,24 @@ static std::string renderFixits(ArrayRef<llvm::SMFixIt> fixits,
                                 StringRef InputFile) {
   std::string Result;
   llvm::raw_string_ostream OS(Result);
-  bool isFirst = true;
-  for (auto &ActualFixIt : fixits) {
-    llvm::SMRange Range = ActualFixIt.getRange();
-    
-    if (isFirst)
-      isFirst = false;
-    else
-      OS << ' ';
-    OS << "{{"
-    << getColumnNumber(InputFile, Range.Start) << '-'
-    << getColumnNumber(InputFile, Range.End) << '=';
-    
-    for (auto C : ActualFixIt.getText()) {
-      if (C == '\n')
-        OS << "\\n";
-      else if (C == '}' || C == '\\')
-        OS << '\\' << C;
-      else
-        OS << C;
-    }
-    OS << "}}";
-  }
+  interleave(fixits,
+             [&](const llvm::SMFixIt &ActualFixIt) {
+               llvm::SMRange Range = ActualFixIt.getRange();
+
+               OS << "{{" << getColumnNumber(InputFile, Range.Start) << '-'
+                  << getColumnNumber(InputFile, Range.End) << '=';
+
+               for (auto C : ActualFixIt.getText()) {
+                 if (C == '\n')
+                   OS << "\\n";
+                 else if (C == '}' || C == '\\')
+                   OS << '\\' << C;
+                 else
+                   OS << C;
+               }
+               OS << "}}";
+             },
+             [&] { OS << ' '; });
   return OS.str();
 }
 
@@ -621,6 +622,24 @@ bool DiagnosticVerifier::verifyFile(unsigned BufferID,
   return !Errors.empty();
 }
 
+bool DiagnosticVerifier::verifyUnknown() {
+  bool HadError = false;
+  for (unsigned i = 0, e = CapturedDiagnostics.size(); i != e; ++i) {
+    if (CapturedDiagnostics[i].getFilename() != "<unknown>")
+      continue;
+
+    HadError = true;
+    std::string Message =
+      "unexpected "+getDiagKindString(CapturedDiagnostics[i].getKind())+
+      " produced: "+CapturedDiagnostics[i].getMessage().str();
+
+    auto diag = SM.GetMessage({}, llvm::SourceMgr::DK_Error, Message,
+                              {}, {});
+    SM.getLLVMSourceMgr().PrintMessage(llvm::errs(), diag);
+  }
+  return HadError;
+}
+
 /// If there are any -verify errors (e.g. differences between expectations
 /// and actual diagnostics produced), apply fixits to the original source
 /// file and drop it back in place.
@@ -677,35 +696,31 @@ void DiagnosticVerifier::autoApplyFixes(unsigned BufferID,
 // Main entrypoints
 //===----------------------------------------------------------------------===//
 
-/// VerifyModeDiagnosticHook - Every time a diagnostic is generated in -verify
-/// mode, this function is called with the diagnostic.  We just buffer them up
-/// until the end of the file.
+/// Every time a diagnostic is generated in -verify mode, this function is
+/// called with the diagnostic.  We just buffer them up until the end of the
+/// file.
 static void VerifyModeDiagnosticHook(const llvm::SMDiagnostic &Diag,
                                      void *Context) {
   ((DiagnosticVerifier*)Context)->addDiagnostic(Diag);
 }
 
 
-/// enableDiagnosticVerifier - Set up the specified source manager so that
-/// diagnostics are captured instead of being printed.
 void swift::enableDiagnosticVerifier(SourceManager &SM) {
   SM.getLLVMSourceMgr().setDiagHandler(VerifyModeDiagnosticHook,
                                        new DiagnosticVerifier(SM));
 }
 
-/// verifyDiagnostics - Verify that captured diagnostics meet with the
-/// expectations of the source files corresponding to the specified BufferIDs
-/// and tear down our support for capturing and verifying diagnostics.
-bool swift::verifyDiagnostics(SourceManager &SM, ArrayRef<unsigned> BufferIDs) {
+bool swift::verifyDiagnostics(SourceManager &SM, ArrayRef<unsigned> BufferIDs,
+                              bool autoApplyFixes, bool ignoreUnknown) {
   auto *Verifier = (DiagnosticVerifier*)SM.getLLVMSourceMgr().getDiagContext();
   SM.getLLVMSourceMgr().setDiagHandler(nullptr, nullptr);
-
-  bool autoApplyFixes = false;
   
   bool HadError = false;
 
   for (auto &BufferID : BufferIDs)
     HadError |= Verifier->verifyFile(BufferID, autoApplyFixes);
+  if (!ignoreUnknown)
+    HadError |= Verifier->verifyUnknown();
 
   delete Verifier;
 

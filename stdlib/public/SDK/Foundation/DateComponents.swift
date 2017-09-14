@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -217,16 +217,20 @@ public struct DateComponents : ReferenceConvertible, Hashable, Equatable, _Mutab
     ///
     /// The calendar and timeZone and isLeapMonth properties cannot be set by this method.
     @available(OSX 10.9, iOS 8.0, *)
-    public mutating func setValue(_ value: Int?, forComponent unit: Calendar.Unit) {
-        _applyMutation { $0.setValue(_setter(value), forComponent: unit) }
+    public mutating func setValue(_ value: Int?, for component: Calendar.Component) {
+        _applyMutation {
+            $0.setValue(_setter(value), forComponent: Calendar._toCalendarUnit([component]))
+        }
     }
     
     /// Returns the value of one of the properties, using an enumeration value instead of a property name.
     ///
     /// The calendar and timeZone and isLeapMonth property values cannot be retrieved by this method.
     @available(OSX 10.9, iOS 8.0, *)
-    public func value(forComponent unit: Calendar.Unit) -> Int? {
-        return _handle.map { $0.value(forComponent: unit) }
+    public func value(for component: Calendar.Component) -> Int? {
+        return _handle.map {
+            $0.value(forComponent: Calendar._toCalendarUnit([component]))
+        }
     }
     
     // MARK: -
@@ -263,34 +267,57 @@ public struct DateComponents : ReferenceConvertible, Hashable, Equatable, _Mutab
         return _handle.map { $0.hash }
     }
     
-    public var description: String {
-        return _handle.map { $0.description }
-    }
-    
-    public var debugDescription: String {
-        return _handle.map { $0.debugDescription }
-    }
-
     // MARK: - Bridging Helpers
     
-    private init(reference: NSDateComponents) {
+    fileprivate init(reference: NSDateComponents) {
         _handle = _MutableHandle(reference: reference)
+    }
+
+    public static func ==(lhs : DateComponents, rhs: DateComponents) -> Bool {
+        // Don't copy references here; no one should be storing anything
+        return lhs._handle._uncopiedReference().isEqual(rhs._handle._uncopiedReference())
     }
 
 }
 
-public func ==(lhs : DateComponents, rhs: DateComponents) -> Bool {
-    // Don't copy references here; no one should be storing anything
-    return lhs._handle._uncopiedReference().isEqual(rhs._handle._uncopiedReference())
+extension DateComponents : CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    
+    public var description: String {
+        return self.customMirror.children.reduce("") {
+            $0.appending("\($1.label ?? ""): \($1.value) ")
+        }
+    }
+    
+    public var debugDescription: String {
+        return self.description
+    }
+    
+    public var customMirror: Mirror {
+        var c: [(label: String?, value: Any)] = []
+        if let r = calendar { c.append((label: "calendar", value: r)) }
+        if let r = timeZone { c.append((label: "timeZone", value: r)) }
+        if let r = era { c.append((label: "era", value: r)) }
+        if let r = year { c.append((label: "year", value: r)) }
+        if let r = month { c.append((label: "month", value: r)) }
+        if let r = day { c.append((label: "day", value: r)) }
+        if let r = hour { c.append((label: "hour", value: r)) }
+        if let r = minute { c.append((label: "minute", value: r)) }
+        if let r = second { c.append((label: "second", value: r)) }
+        if let r = nanosecond { c.append((label: "nanosecond", value: r)) }
+        if let r = weekday { c.append((label: "weekday", value: r)) }
+        if let r = weekdayOrdinal { c.append((label: "weekdayOrdinal", value: r)) }
+        if let r = quarter { c.append((label: "quarter", value: r)) }
+        if let r = weekOfMonth { c.append((label: "weekOfMonth", value: r)) }
+        if let r = weekOfYear { c.append((label: "weekOfYear", value: r)) }
+        if let r = yearForWeekOfYear { c.append((label: "yearForWeekOfYear", value: r)) }
+        if let r = isLeapMonth { c.append((label: "isLeapMonth", value: r)) }
+        return Mirror(self, children: c, displayStyle: Mirror.DisplayStyle.struct)
+    }
 }
 
 // MARK: - Bridging
 
 extension DateComponents : _ObjectiveCBridgeable {
-    public static func _isBridgedToObjectiveC() -> Bool {
-        return true
-    }
-    
     public static func _getObjectiveCType() -> Any.Type {
         return NSDateComponents.self
     }
@@ -312,9 +339,94 @@ extension DateComponents : _ObjectiveCBridgeable {
     }
 
     public static func _unconditionallyBridgeFromObjectiveC(_ source: NSDateComponents?) -> DateComponents {
-        var result: DateComponents? = nil
-        _forceBridgeFromObjectiveC(source!, result: &result)
-        return result!
+        guard let src = source else { return DateComponents() }
+        return DateComponents(reference: src)
     }
 }
 
+extension NSDateComponents : _HasCustomAnyHashableRepresentation {
+    // Must be @nonobjc to avoid infinite recursion during bridging.
+    @nonobjc
+    public func _toCustomAnyHashable() -> AnyHashable? {
+        return AnyHashable(self as DateComponents)
+    }
+}
+
+extension DateComponents : Codable {
+    private enum CodingKeys : Int, CodingKey {
+        case calendar
+        case timeZone
+        case era
+        case year
+        case month
+        case day
+        case hour
+        case minute
+        case second
+        case nanosecond
+        case weekday
+        case weekdayOrdinal
+        case quarter
+        case weekOfMonth
+        case weekOfYear
+        case yearForWeekOfYear
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container  = try decoder.container(keyedBy: CodingKeys.self)
+        let calendar   = try container.decodeIfPresent(Calendar.self, forKey: .calendar)
+        let timeZone   = try container.decodeIfPresent(TimeZone.self, forKey: .timeZone)
+        let era        = try container.decodeIfPresent(Int.self, forKey: .era)
+        let year       = try container.decodeIfPresent(Int.self, forKey: .year)
+        let month      = try container.decodeIfPresent(Int.self, forKey: .month)
+        let day        = try container.decodeIfPresent(Int.self, forKey: .day)
+        let hour       = try container.decodeIfPresent(Int.self, forKey: .hour)
+        let minute     = try container.decodeIfPresent(Int.self, forKey: .minute)
+        let second     = try container.decodeIfPresent(Int.self, forKey: .second)
+        let nanosecond = try container.decodeIfPresent(Int.self, forKey: .nanosecond)
+
+        let weekday           = try container.decodeIfPresent(Int.self, forKey: .weekday)
+        let weekdayOrdinal    = try container.decodeIfPresent(Int.self, forKey: .weekdayOrdinal)
+        let quarter           = try container.decodeIfPresent(Int.self, forKey: .quarter)
+        let weekOfMonth       = try container.decodeIfPresent(Int.self, forKey: .weekOfMonth)
+        let weekOfYear        = try container.decodeIfPresent(Int.self, forKey: .weekOfYear)
+        let yearForWeekOfYear = try container.decodeIfPresent(Int.self, forKey: .yearForWeekOfYear)
+
+        self.init(calendar: calendar,
+                  timeZone: timeZone,
+                  era: era,
+                  year: year,
+                  month: month,
+                  day: day,
+                  hour: hour,
+                  minute: minute,
+                  second: second,
+                  nanosecond: nanosecond,
+                  weekday: weekday,
+                  weekdayOrdinal: weekdayOrdinal,
+                  quarter: quarter,
+                  weekOfMonth: weekOfMonth,
+                  weekOfYear: weekOfYear,
+                  yearForWeekOfYear: yearForWeekOfYear)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(self.calendar, forKey: .calendar)
+        try container.encodeIfPresent(self.timeZone, forKey: .timeZone)
+        try container.encodeIfPresent(self.era, forKey: .era)
+        try container.encodeIfPresent(self.year, forKey: .year)
+        try container.encodeIfPresent(self.month, forKey: .month)
+        try container.encodeIfPresent(self.day, forKey: .day)
+        try container.encodeIfPresent(self.hour, forKey: .hour)
+        try container.encodeIfPresent(self.minute, forKey: .minute)
+        try container.encodeIfPresent(self.second, forKey: .second)
+        try container.encodeIfPresent(self.nanosecond, forKey: .nanosecond)
+        try container.encodeIfPresent(self.weekday, forKey: .weekday)
+        try container.encodeIfPresent(self.weekdayOrdinal, forKey: .weekdayOrdinal)
+        try container.encodeIfPresent(self.quarter, forKey: .quarter)
+        try container.encodeIfPresent(self.weekOfMonth, forKey: .weekOfMonth)
+        try container.encodeIfPresent(self.weekOfYear, forKey: .weekOfYear)
+        try container.encodeIfPresent(self.yearForWeekOfYear, forKey: .yearForWeekOfYear)
+    }
+}

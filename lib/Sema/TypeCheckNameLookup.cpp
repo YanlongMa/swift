@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -16,15 +16,18 @@
 //
 //===----------------------------------------------------------------------===//
 #include "TypeChecker.h"
+#include "swift/AST/ExistentialLayout.h"
+#include "swift/AST/Initializer.h"
 #include "swift/AST/NameLookup.h"
+#include "swift/AST/ProtocolConformance.h"
 #include "swift/Basic/TopCollection.h"
 #include <algorithm>
 
 using namespace swift;
 
-void LookupResult::filter(const std::function<bool(Result)> &pred) {
+void LookupResult::filter(const std::function<bool(LookupResultEntry)> &pred) {
   Results.erase(std::remove_if(Results.begin(), Results.end(),
-                               [&](Result result) -> bool {
+                               [&](LookupResultEntry result) -> bool {
                                  return !pred(result);
                                }),
                 Results.end());
@@ -38,22 +41,20 @@ namespace {
     LookupResult &Result;
     DeclContext *DC;
     NameLookupOptions Options;
-    bool ConsiderProtocolMembers;
-    bool SearchingFromProtoExt = false;
+    bool IsMemberLookup;
 
     /// The vector of found declarations.
     SmallVector<ValueDecl *, 4> FoundDecls;
 
     /// The set of known declarations.
-    llvm::SmallDenseMap<std::pair<ValueDecl *, ValueDecl *>, bool, 4> Known;
+    llvm::SmallDenseMap<std::pair<ValueDecl *, DeclContext *>, bool, 4> Known;
 
   public:
     LookupResultBuilder(TypeChecker &tc, LookupResult &result, DeclContext *dc,
-                        NameLookupOptions options, bool considerProtocolMembers,
-                        bool searchingFromProtoExt)
+                        NameLookupOptions options,
+                        bool isMemberLookup)
       : TC(tc), Result(result), DC(dc), Options(options),
-        ConsiderProtocolMembers(considerProtocolMembers),
-        SearchingFromProtoExt(searchingFromProtoExt) { }
+        IsMemberLookup(isMemberLookup) { }
 
     ~LookupResultBuilder() {
       // If any of the results have a base, we need to remove
@@ -62,29 +63,27 @@ namespace {
       // but there are weird assumptions about the results of unqualified
       // name lookup, e.g., that a local variable not having a type indicates
       // that it hasn't been seen yet.
-      if (std::find_if(Result.begin(), Result.end(),
-                       [](const LookupResult::Result &found) {
-                         return found.Base != nullptr;
+      if (!IsMemberLookup &&
+          std::find_if(Result.begin(), Result.end(),
+                       [](const LookupResultEntry &found) {
+                         return found.getBaseDecl() != nullptr;
                        }) == Result.end())
         return;
 
-      bool anyRemoved = false;
-
       // Remove any overridden declarations from the found-declarations set.
-      if (removeOverriddenDecls(FoundDecls))
-        anyRemoved = true;
+      removeOverriddenDecls(FoundDecls);
 
       // Remove any shadowed declarations from the found-declarations set.
-      if (removeShadowedDecls(FoundDecls, DC->getParentModule(), &TC))
-        anyRemoved = true;
+      removeShadowedDecls(FoundDecls, DC->getParentModule(), &TC);
 
       // Filter out those results that have been removed from the
       // found-declarations set.
       unsigned foundIdx = 0, foundSize = FoundDecls.size();
-      Result.filter([&](LookupResult::Result result) -> bool {
+      Result.filter([&](LookupResultEntry result) -> bool {
           // If the current result matches the remaining found declaration,
           // keep it and move to the next found declaration.
-          if (foundIdx < foundSize && result.Decl == FoundDecls[foundIdx]) {
+          if (foundIdx < foundSize &&
+              result.getValueDecl() == FoundDecls[foundIdx]) {
             ++foundIdx;
             return true;
           }
@@ -98,223 +97,240 @@ namespace {
     ///
     /// \param found The declaration we found.
     ///
-    /// \param base The base declaration through which we found the
+    /// \param baseDC The declaration context through which we found the
     /// declaration.
     ///
     /// \param foundInType The type through which we found the
     /// declaration.
-    ///
-    /// \param promotedInstanceRef true if the lookup result to be added was
-    /// actually looked up on an instance but promted to a type to look up an
-    /// enum element
-    void add(ValueDecl *found, ValueDecl *base, Type foundInType,
-             bool promotedInstanceRef = false) {
-      // If we only want types, AST name lookup should not yield anything else.
-      assert(!Options.contains(NameLookupFlags::OnlyTypes) ||
-             isa<TypeDecl>(found));
-
+    void add(ValueDecl *found, DeclContext *baseDC, Type foundInType) {
       ConformanceCheckOptions conformanceOptions;
       if (Options.contains(NameLookupFlags::KnownPrivate))
         conformanceOptions |= ConformanceCheckFlags::InExpression;
 
       DeclContext *foundDC = found->getDeclContext();
-      auto foundProto = foundDC->getAsProtocolOrProtocolExtensionContext();
 
-      // Determine the nominal type through which we found the
-      // declaration.
-      NominalTypeDecl *baseNominal = nullptr;
-      if (!base) {
-        // Nothing to do.
-      } else if (auto baseParam = dyn_cast<ParamDecl>(base)) {
-        auto baseDC = baseParam->getDeclContext();
-        if (isa<AbstractFunctionDecl>(baseDC))
-          baseDC = baseDC->getParent();
-
-        baseNominal = baseDC->getAsNominalTypeOrNominalTypeExtensionContext();
-        assert(baseNominal && "Did not find nominal type");
-      } else {
-        baseNominal = cast<NominalTypeDecl>(base);
-      }
+      auto addResult = [&](ValueDecl *result) {
+        if (Known.insert({{result, baseDC}, false}).second) {
+          Result.add(LookupResultEntry(baseDC, result));
+          FoundDecls.push_back(result);
+        }
+      };
 
       // If this isn't a protocol member to be given special
       // treatment, just add the result.
-      if (!ConsiderProtocolMembers ||
-          !isa<ProtocolDecl>(found->getDeclContext()) ||
-          SearchingFromProtoExt ||
+      if (!Options.contains(NameLookupFlags::ProtocolMembers) ||
+          !isa<ProtocolDecl>(foundDC) ||
           isa<GenericTypeParamDecl>(found) ||
           (isa<FuncDecl>(found) && cast<FuncDecl>(found)->isOperator())) {
-        if (Known.insert({{found, base}, false}).second) {
-          Result.add({found, base, promotedInstanceRef});
-          FoundDecls.push_back(found);
-        }
+        addResult(found);
         return;
       }
+
+      assert(isa<ProtocolDecl>(foundDC));
+
+      if (!Options.contains(NameLookupFlags::PerformConformanceCheck))
+        return;
 
       // If we found something within the protocol itself, and our
       // search began somewhere that is not in a protocol or extension
       // thereof, remap this declaration to the witness.
-      if (isa<ProtocolDecl>(foundDC) && !isa<ProtocolDecl>(baseNominal)) {
-        // Dig out the protocol conformance.
-        ProtocolConformance *conformance = nullptr;
-        if (!TC.conformsToProtocol(foundInType, foundProto, DC,
-                                   conformanceOptions, &conformance) ||
-            !conformance)
-          return;
+      auto conformingType = foundInType;
 
-        // Dig out the witness.
-        ValueDecl *witness;
-        if (auto assocType = dyn_cast<AssociatedTypeDecl>(found)) {
-          witness = conformance->getTypeWitnessSubstAndDecl(assocType, &TC)
-            .second;
-        } else if (isa<TypeAliasDecl>(found)) {
-          // No witness for typealiases.
-          return;
-        } else {
-          witness = conformance->getWitness(found, &TC).getDecl();
-        }
+      // When performing a lookup on a subclass existential, we might
+      // find a member of the class that witnesses a requirement on a
+      // protocol that the class conforms to.
+      //
+      // Since subclass existentials don't normally conform to protocols,
+      // pull out the superclass instead, and use that below.
+      if (foundInType->isExistentialType()) {
+        auto layout = foundInType->getExistentialLayout();
+        if (layout.superclass)
+          conformingType = layout.superclass;
+      }
 
-        // FIXME: the "isa<ProtocolDecl>()" check will be wrong for
-        // default implementations in protocols.
-        if (witness && !isa<ProtocolDecl>(witness->getDeclContext())) {
-          if (Known.insert({{witness, base}, false}).second) {
-            Result.add({witness, base, promotedInstanceRef});
-            FoundDecls.push_back(witness);
-          }
-        }
+      // Dig out the protocol conformance.
+      auto *foundProto = cast<ProtocolDecl>(foundDC);
+      auto conformance = TC.conformsToProtocol(conformingType, foundProto, DC,
+                                               conformanceOptions);
+      if (!conformance) {
+        // If there's no conformance, we have an existential
+        // and we found a member from one of the protocols, and
+        // not a class constraint if any.
+        assert(foundInType->isExistentialType());
+        addResult(found);
         return;
       }
+
+      if (conformance->isAbstract()) {
+        assert(foundInType->is<ArchetypeType>() ||
+               foundInType->isExistentialType());
+        addResult(found);
+        return;
+      }
+
+      // Dig out the witness.
+      ValueDecl *witness = nullptr;
+      auto concrete = conformance->getConcrete();
+      if (auto assocType = dyn_cast<AssociatedTypeDecl>(found)) {
+        witness = concrete->getTypeWitnessAndDecl(assocType, &TC)
+          .second;
+      } else if (found->isProtocolRequirement()) {
+        witness = concrete->getWitnessDecl(found, &TC);
+      }
+
+      // FIXME: the "isa<ProtocolDecl>()" check will be wrong for
+      // default implementations in protocols.
+      //
+      // If we have an imported conformance or the witness could
+      // not be deserialized, getWitnessDecl() will just return
+      // the requirement, so just drop the lookup result here.
+      if (witness && !isa<ProtocolDecl>(witness->getDeclContext()))
+        addResult(witness);
     }
   };
-}
+} // end anonymous namespace
 
 LookupResult TypeChecker::lookupUnqualified(DeclContext *dc, DeclName name,
                                             SourceLoc loc,
                                             NameLookupOptions options) {
-  // Determine whether we're searching from a protocol extension.
-  bool searchingFromProtoExt = false;
-  for (auto outerDC = dc; outerDC; outerDC = outerDC->getParent()) {
-    if (auto ext = dyn_cast<ExtensionDecl>(outerDC)) {
-      if (ext->getExtendedType() && ext->getExtendedType()->is<ProtocolType>()) {
-        searchingFromProtoExt = true;
-        break;
-      }
-    }
-  }
-
-  UnqualifiedLookup lookup(name, dc, this,
-                           options.contains(NameLookupFlags::KnownPrivate),
-                           loc,
-                           options.contains(NameLookupFlags::OnlyTypes),
-                           options.contains(NameLookupFlags::ProtocolMembers));
+  UnqualifiedLookup lookup(
+      name, dc, this,
+      options.contains(NameLookupFlags::KnownPrivate),
+      loc,
+      /*IsTypeLookup=*/false,
+      options.contains(NameLookupFlags::ProtocolMembers),
+      options.contains(NameLookupFlags::IgnoreAccessControl));
 
   LookupResult result;
-  bool considerProtocolMembers
-    = options.contains(NameLookupFlags::ProtocolMembers);
   LookupResultBuilder builder(*this, result, dc, options,
-                              considerProtocolMembers,
-                              searchingFromProtoExt);
+                              /*memberLookup*/false);
   for (const auto &found : lookup.Results) {
     // Determine which type we looked through to find this result.
     Type foundInType;
-    if (!found.getBaseDecl()) {
-      // Not found within a type.
-    } else if (auto baseParam = dyn_cast<ParamDecl>(found.getBaseDecl())) {
-      auto baseDC = baseParam->getDeclContext();
-      if (isa<AbstractFunctionDecl>(baseDC))
+
+    if (auto *baseDC = found.getDeclContext()) {
+      if (!baseDC->isTypeContext()) {
         baseDC = baseDC->getParent();
-      foundInType = baseDC->getDeclaredTypeInContext();
-    } else {
-      auto baseNominal = cast<NominalTypeDecl>(found.getBaseDecl());
-      for (auto currentDC = dc; currentDC; currentDC = currentDC->getParent()) {
-        if (currentDC->getAsNominalTypeOrNominalTypeExtensionContext()
-              == baseNominal) {
-          foundInType = currentDC->getDeclaredTypeInContext();
-        }
+        assert(baseDC->isTypeContext());
       }
+      foundInType = dc->mapTypeIntoContext(
+        baseDC->getDeclaredInterfaceType());
       assert(foundInType && "bogus base declaration?");
     }
 
-    builder.add(found.getValueDecl(), found.getBaseDecl(), foundInType,
-                found.IsPromotedInstanceRef);
+    builder.add(found.getValueDecl(), found.getDeclContext(), foundInType);
   }
   return result;
+}
+
+LookupResult
+TypeChecker::lookupUnqualifiedType(DeclContext *dc, DeclName name,
+                                   SourceLoc loc,
+                                   NameLookupOptions options) {
+  {
+    // Try lookup without ProtocolMembers first.
+    UnqualifiedLookup lookup(
+      name, dc, this,
+        options.contains(NameLookupFlags::KnownPrivate),
+        loc,
+        /*IsTypeLookup=*/true,
+        /*AllowProtocolMembers=*/false,
+        options.contains(NameLookupFlags::IgnoreAccessControl));
+
+    if (!lookup.Results.empty() ||
+        !options.contains(NameLookupFlags::ProtocolMembers)) {
+      return LookupResult(lookup.Results);
+    }
+  }
+
+  {
+    // Try again, this time with protocol members.
+    //
+    // FIXME: Fix the problem where if NominalTypeDecl::getAllProtocols()
+    // is called too early, we start resolving extensions -- even those
+    // which do provide not conformances.
+    UnqualifiedLookup lookup(
+      name, dc, this,
+        options.contains(NameLookupFlags::KnownPrivate),
+        loc,
+        /*IsTypeLookup=*/true,
+        /*AllowProtocolMembers=*/true,
+        options.contains(NameLookupFlags::IgnoreAccessControl));
+
+    return LookupResult(lookup.Results);
+  }
 }
 
 LookupResult TypeChecker::lookupMember(DeclContext *dc,
                                        Type type, DeclName name,
                                        NameLookupOptions options) {
+  assert(type->mayHaveMembers());
+
   LookupResult result;
   NLOptions subOptions = NL_QualifiedDefault;
   if (options.contains(NameLookupFlags::KnownPrivate))
     subOptions |= NL_KnownNonCascadingDependency;
   if (options.contains(NameLookupFlags::DynamicLookup))
     subOptions |= NL_DynamicLookup;
-  if (options.contains(NameLookupFlags::IgnoreAccessibility))
-    subOptions |= NL_IgnoreAccessibility;
-  if (options.contains(NameLookupFlags::OnlyTypes))
-    subOptions |= NL_OnlyTypes;
+  if (options.contains(NameLookupFlags::IgnoreAccessControl))
+    subOptions |= NL_IgnoreAccessControl;
 
-  // Dig out the type that we'll actually be looking into, and determine
-  // whether it is a nominal type.
-  Type lookupType = type;
-  if (auto lvalueType = lookupType->getAs<LValueType>()) {
-    lookupType = lvalueType->getObjectType();
-  }
-  if (auto metaType = lookupType->getAs<MetatypeType>()) {
-    lookupType = metaType->getInstanceType();
-  }
-  NominalTypeDecl *nominalLookupType = lookupType->getAnyNominal();
-
-  /// Whether to consider protocol members or not.
-  bool considerProtocolMembers
-    = nominalLookupType && !isa<ProtocolDecl>(nominalLookupType) &&
-      options.contains(NameLookupFlags::ProtocolMembers);
-  if (considerProtocolMembers)
+  if (options.contains(NameLookupFlags::ProtocolMembers))
     subOptions |= NL_ProtocolMembers;
 
   // We handle our own overriding/shadowing filtering.
   subOptions &= ~NL_RemoveOverridden;
   subOptions &= ~NL_RemoveNonVisible;
 
-  // We can't have tuple types here; they need to be handled elsewhere.
-  assert(!type->is<TupleType>());
+  LookupResultBuilder builder(*this, result, dc, options,
+                              /*memberLookup*/true);
+  SmallVector<ValueDecl *, 4> lookupResults;
+  dc->lookupQualified(type, name, subOptions, this, lookupResults);
 
-  // Local function that performs lookup.
-  auto doLookup = [&]() {
-    result.clear();
-
-    LookupResultBuilder builder(*this, result, dc, options,
-                                considerProtocolMembers,
-                                false);
-    SmallVector<ValueDecl *, 4> lookupResults;
-    dc->lookupQualified(type, name, subOptions, this, lookupResults);
-
-    for (auto found : lookupResults) {
-      builder.add(found, nominalLookupType, type);
-    }
-  };
-
-  doLookup();
-
-  if (result.empty()) {
-    // If we didn't find anything, /and/ this is a nominal type, check to see
-    // if any of the nominal's protocols are derivable and contain the
-    // name we're looking for. (Note that we are not including extensions
-    // here -- default derivation doesn't apply in extensions.)
-    if (!nominalLookupType)
-      return result;
-    
-    // Force the creation of any delayed members, to ensure proper member
-    // lookup.
-    this->forceExternalDeclMembers(nominalLookupType);
-
-    // Perform the lookup again.
-    // FIXME: This is only because forceExternalDeclMembers() might do something
-    // interesting.
-    doLookup();
-  }
+  for (auto found : lookupResults)
+    builder.add(found, nullptr, type);
 
   return result;
+}
+
+bool TypeChecker::isUnsupportedMemberTypeAccess(Type type, TypeDecl *typeDecl) {
+  auto memberType = typeDecl->getDeclaredInterfaceType();
+
+  // We don't allow lookups of a non-generic typealias of an unbound
+  // generic type, because we have no way to model such a type in the
+  // AST.
+  //
+  // For generic typealiases, the typealias itself has an unbound
+  // generic form whose parent type can be another unbound generic
+  // type.
+  //
+  // FIXME: Could lift this restriction once we have sugared
+  // "member types".
+  if (type->is<UnboundGenericType>() &&
+      isa<TypeAliasDecl>(typeDecl) &&
+      cast<TypeAliasDecl>(typeDecl)->getGenericParams() == nullptr &&
+      memberType->hasTypeParameter()) {
+    return true;
+  }
+
+  if (type->is<UnboundGenericType>() &&
+      isa<AssociatedTypeDecl>(typeDecl)) {
+    return true;
+  }
+
+  // We don't allow lookups of an associated type or typealias of an
+  // existential type, because we have no way to represent such types.
+  if (typeDecl->getDeclContext()->getAsProtocolOrProtocolExtensionContext()) {
+    if (type->isExistentialType() &&
+        (isa<TypeAliasDecl>(typeDecl) ||
+         isa<AssociatedTypeDecl>(typeDecl))) {
+      if (memberType->hasTypeParameter()) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 LookupTypeResult TypeChecker::lookupMemberType(DeclContext *dc,
@@ -322,17 +338,6 @@ LookupTypeResult TypeChecker::lookupMemberType(DeclContext *dc,
                                                NameLookupOptions options) {
   LookupTypeResult result;
 
-  // Look through an inout type.
-  if (auto inout = type->getAs<InOutType>())
-    type = inout->getObjectType();
-
-  // Look through the metatype.
-  if (auto metaT = type->getAs<AnyMetatypeType>())
-    type = metaT->getInstanceType();
-  
-  // Callers must cope with dependent types directly.  
-  assert(!type->isTypeParameter());
-         
   // Look for members with the given name.
   SmallVector<ValueDecl *, 4> decls;
   NLOptions subOptions = NL_QualifiedDefault | NL_OnlyTypes;
@@ -341,8 +346,8 @@ LookupTypeResult TypeChecker::lookupMemberType(DeclContext *dc,
     subOptions |= NL_KnownNonCascadingDependency;
   if (options.contains(NameLookupFlags::ProtocolMembers))
     subOptions |= NL_ProtocolMembers;
-  if (options.contains(NameLookupFlags::IgnoreAccessibility))
-    subOptions |= NL_IgnoreAccessibility;
+  if (options.contains(NameLookupFlags::IgnoreAccessControl))
+    subOptions |= NL_IgnoreAccessControl;
 
   if (!dc->lookupQualified(type, name, subOptions, this, decls))
     return result;
@@ -355,52 +360,57 @@ LookupTypeResult TypeChecker::lookupMemberType(DeclContext *dc,
 
     // FIXME: This should happen before we attempt shadowing checks.
     validateDecl(typeDecl);
-    if (!typeDecl->hasType()) // FIXME: recursion-breaking hack
+    if (!typeDecl->hasInterfaceType()) // FIXME: recursion-breaking hack
       continue;
 
-    // If we're looking up a member of a protocol, we must take special care.
+    auto memberType = typeDecl->getDeclaredInterfaceType();
+
+    if (isUnsupportedMemberTypeAccess(type, typeDecl)) {
+      // Add the type to the result set, so that we can diagnose the
+      // reference instead of just saying the member does not exist.
+      if (types.insert(memberType->getCanonicalType()).second)
+        result.Results.push_back({typeDecl, memberType});
+
+      continue;
+    }
+
+    // If we're looking up an associated type of a concrete type,
+    // record it later for conformance checking; we might find a more
+    // direct typealias with the same name later.
     if (typeDecl->getDeclContext()->getAsProtocolOrProtocolExtensionContext()) {
-      // We don't allow lookups of an associated type or typealias of an
-      // existential type, because we have no way to represent such types.
-      //
-      // This is diagnosed further on down in resolveNestedIdentTypeComponent().
-      if (type->isExistentialType()) {
-        auto memberType = typeDecl->getInterfaceType()->getRValueInstanceType();
-
-        if (memberType->hasTypeParameter()) {
-          // If we haven't seen this type result yet, add it to the result set.
-          if (types.insert(memberType->getCanonicalType()).second)
-            result.Results.push_back({typeDecl, memberType});
-
-          continue;
-        }
-      }
-
-      // If we're looking up an associated type of a concrete type,
-      // record it later for conformance checking; we might find a more
-      // direct typealias with the same name later.
       if (auto assocType = dyn_cast<AssociatedTypeDecl>(typeDecl)) {
-        if (!type->is<ArchetypeType>()) {
-          inferredAssociatedTypes.push_back(assocType);
+        if (!type->is<ArchetypeType>() &&
+            !type->isTypeParameter()) {
+          if (options.contains(NameLookupFlags::PerformConformanceCheck))
+            inferredAssociatedTypes.push_back(assocType);
           continue;
         }
       }
 
-      // We are looking up an associated type of an archetype, or a
-      // protocol typealias or an archetype or concrete type.
-      //
-      // Proceed with the usual path below.
+      // FIXME: This is a hack, we should be able to remove this entire 'if'
+      // statement once we learn how to deal with the circularity here.
+      if (isa<TypeAliasDecl>(typeDecl) &&
+          isa<ProtocolDecl>(typeDecl->getDeclContext())) {
+        if (!type->is<ArchetypeType>() &&
+            !type->isTypeParameter() &&
+            memberType->hasTypeParameter() &&
+            !options.contains(NameLookupFlags::PerformConformanceCheck)) {
+          continue;
+        }
+      }
+
+      // Nominal type members of protocols cannot be accessed with an
+      // archetype base, because we have no way to recover the correct
+      // substitutions.
+      if (type->is<ArchetypeType>() &&
+          isa<NominalTypeDecl>(typeDecl)) {
+        continue;
+      }
     }
 
     // Substitute the base into the member's type.
-    auto memberType = substMemberTypeWithBase(dc->getParentModule(),
-                                              typeDecl, type,
-                                              /*isTypeReference=*/true);
-
-    // FIXME: It is not clear why this substitution can fail, but the
-    // standard library won't build without this check.
-    if (!memberType)
-      continue;
+    memberType = substMemberTypeWithBase(dc->getParentModule(),
+                                         typeDecl, type);
 
     // If we haven't seen this type result yet, add it to the result set.
     if (types.insert(memberType->getCanonicalType()).second)
@@ -418,17 +428,28 @@ LookupTypeResult TypeChecker::lookupMemberType(DeclContext *dc,
       // If the type does not actually conform to the protocol, skip this
       // member entirely.
       auto *protocol = cast<ProtocolDecl>(assocType->getDeclContext());
-      ProtocolConformance *conformance = nullptr;
-      if (!conformsToProtocol(type, protocol, dc, conformanceOptions,
-                              &conformance) ||
-          !conformance) {
+
+      // If we're validating the protocol recursively, bail out.
+      if (!protocol->hasValidSignature())
+        continue;
+
+      auto conformance = conformsToProtocol(type, protocol, dc,
+                                            conformanceOptions);
+      if (!conformance) {
         // FIXME: This is an error path. Should we try to recover?
         continue;
       }
 
       // Use the type witness.
-      Type memberType =
-        conformance->getTypeWitness(assocType, this).getReplacement();
+      auto concrete = conformance->getConcrete();
+      Type memberType = concrete->getTypeWitness(assocType, this);
+
+      // This is the only case where NormalProtocolConformance::
+      // getTypeWitnessAndDecl() returns a null type.
+      if (concrete->getState() ==
+          ProtocolConformanceState::CheckingTypeWitnesses)
+        continue;
+
       assert(memberType && "Missing type witness?");
 
       // If we haven't seen this type result yet, add it to the result set.
@@ -460,14 +481,22 @@ static unsigned getCallEditDistance(DeclName argName, DeclName paramName,
   // TODO: maybe ignore certain kinds of missing / present labels for the
   //   first argument label?
   // TODO: word-based rather than character-based?
-  StringRef argBase = argName.getBaseName().str();
-  StringRef paramBase = paramName.getBaseName().str();
+  if (argName.getBaseName().getKind() != paramName.getBaseName().getKind()) {
+    return UnreasonableCallEditDistance;
+  }
+
+  if (argName.getBaseName().getKind() != DeclBaseName::Kind::Normal) {
+    return 0;
+  }
+  assert(argName.getBaseName().getKind() == DeclBaseName::Kind::Normal);
+
+  StringRef argBase = argName.getBaseIdentifier().str();
+  StringRef paramBase = paramName.getBaseIdentifier().str();
 
   unsigned distance = argBase.edit_distance(paramBase, maxEditDistance);
 
   // Bound the distance to UnreasonableCallEditDistance.
-  if (distance >= maxEditDistance ||
-      distance > (paramBase.size() + 2) / 3) {
+  if (distance >= maxEditDistance || distance > (paramBase.size() + 2) / 3) {
     return UnreasonableCallEditDistance;
   }
 
@@ -510,7 +539,7 @@ namespace {
       : DelegatingLazyResolver(TC), NameLoc(nameLoc) {}
 
     void resolveDeclSignature(ValueDecl *VD) override {
-      if (VD->isInvalid() || VD->hasType()) return;
+      if (VD->isInvalid() || VD->hasInterfaceType()) return;
 
       // Don't process a variable if we're within its initializer.
       if (auto var = dyn_cast<VarDecl>(VD)) {
@@ -521,7 +550,7 @@ namespace {
       DelegatingLazyResolver::resolveDeclSignature(VD);
     }
   };
-}
+} // end anonymous namespace
 
 void TypeChecker::performTypoCorrection(DeclContext *DC, DeclRefKind refKind,
                                         Type baseTypeOrNull,
@@ -529,7 +558,17 @@ void TypeChecker::performTypoCorrection(DeclContext *DC, DeclRefKind refKind,
                                         SourceLoc nameLoc,
                                         NameLookupOptions lookupOptions,
                                         LookupResult &result,
+                                        GenericSignatureBuilder *gsb,
                                         unsigned maxResults) {
+  // Disable typo-correction if we won't show the diagnostic anyway or if
+  // we've hit our typo correction limit.
+  if (NumTypoCorrections >= getLangOpts().TypoCorrectionLimit ||
+      (Diags.hasFatalErrorOccurred() &&
+       !Diags.getShowDiagnosticsAfterFatalError()))
+    return;
+
+  ++NumTypoCorrections;
+
   // Fill in a collection of the most reasonable entries.
   TopCollection<unsigned, ValueDecl*> entries(maxResults);
   auto consumer = makeDeclConsumer([&](ValueDecl *decl,
@@ -563,7 +602,7 @@ void TypeChecker::performTypoCorrection(DeclContext *DC, DeclRefKind refKind,
   TypoCorrectionResolver resolver(*this, nameLoc);
   if (baseTypeOrNull) {
     lookupVisibleMemberDecls(consumer, baseTypeOrNull, DC, &resolver,
-                             /*include instance members*/ true);
+                             /*include instance members*/ true, gsb);
   } else {
     lookupVisibleDecls(consumer, DC, &resolver, /*top level*/ true, nameLoc);
   }
@@ -572,7 +611,7 @@ void TypeChecker::performTypoCorrection(DeclContext *DC, DeclRefKind refKind,
   entries.filterMaxScoreRange(MaxCallEditDistanceFromBestCandidate);
 
   for (auto &entry : entries)
-    result.add({ entry.Value, nullptr, false });
+    result.add(LookupResultEntry(entry.Value));
 }
 
 static InFlightDiagnostic
@@ -582,7 +621,7 @@ diagnoseTypoCorrection(TypeChecker &tc, DeclNameLoc loc, ValueDecl *decl) {
     // of the function.
     if (var->isSelfParameter())
       return tc.diagnose(loc.getBaseNameLoc(), diag::note_typo_candidate,
-                         decl->getName().str());
+                         var->getName().str());
   }
 
   if (!decl->getLoc().isValid() && decl->getDeclContext()->isTypeContext()) {
@@ -596,22 +635,23 @@ diagnoseTypoCorrection(TypeChecker &tc, DeclNameLoc loc, ValueDecl *decl) {
                         "member");
 
       return tc.diagnose(parentDecl, diag::note_typo_candidate_implicit_member,
-                         decl->getName().str(), kind);
+                         decl->getBaseName().getIdentifier().str(), kind);
     }
   }
 
-  return tc.diagnose(decl, diag::note_typo_candidate, decl->getName().str());
+  return tc.diagnose(decl, diag::note_typo_candidate,
+                     decl->getBaseName().getIdentifier().str());
 }
 
 void TypeChecker::noteTypoCorrection(DeclName writtenName, DeclNameLoc loc,
-                                     const LookupResult::Result &suggestion) {
-  auto decl = suggestion.Decl;
+                                     ValueDecl *decl) {
   auto &&diagnostic = diagnoseTypoCorrection(*this, loc, decl);
 
   DeclName declName = decl->getFullName();
 
   if (writtenName.getBaseName() != declName.getBaseName())
-    diagnostic.fixItReplace(loc.getBaseNameLoc(), declName.getBaseName().str());
+    diagnostic.fixItReplace(loc.getBaseNameLoc(),
+                            declName.getBaseIdentifier().str());
 
   // TODO: add fix-its for typo'ed argument labels.  This is trickier
   // because of the reordering rules.

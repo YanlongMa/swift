@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 func acceptInt(_ : inout Int) {}
 func acceptDouble(_ : inout Double) {}
@@ -27,7 +27,7 @@ var d = 3.5
 genericFloatingLiteral(d)
 
 extension UInt32 {
-  func asChar() -> UnicodeScalar { return UnicodeScalar(self) }
+  func asChar() -> UnicodeScalar { return UnicodeScalar(self)! }
 }
 var ch = UInt32(65).asChar()
 

@@ -1,4 +1,5 @@
-// RUN: rm -rf %t && mkdir -p %t/Test.app/Contents/MacOS
+// RUN: %empty-directory(%t)
+// RUN: %empty-directory(%t/Test.app/Contents/MacOS)
 // RUN: cp -r %S/Inputs/object_literals-Resources %t/Test.app/Contents/Resources
 // RUN: %target-build-swift %s -o %t/Test.app/Contents/MacOS/main
 // RUN: %target-run %t/Test.app/Contents/MacOS/main
@@ -15,7 +16,7 @@ LiteralsTestSuite.test("file") {
   // This is what requires the proper bundle folder structure.
   let resource = #fileLiteral(resourceName: "testData.plist")
   let contents = NSDictionary(contentsOf: resource) as! [String: NSObject]?
-  _ = expectNotEmpty(contents)
+  _ = expectNotNil(contents)
   expectEqual(["test": true as NSObject], contents!)
 }
 

@@ -1,8 +1,8 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 // REQUIRES: OS=macosx
 
 struct S: _ExpressibleByColorLiteral {
-  init(colorLiteralRed: Float, green: Float, blue: Float, alpha: Float) {}
+  init(_colorLiteralRed: Float, green: Float, blue: Float, alpha: Float) {}
 }
 
 let y: S = #colorLiteral(red: 1, green: 0, blue: 0, alpha: 1)
@@ -22,3 +22,5 @@ struct Path: _ExpressibleByFileReferenceLiteral {
 
 let p1: Path = #fileLiteral(resourceName: "what.txt")
 let p2 = #fileLiteral(resourceName: "what.txt") // expected-error{{could not infer type of file reference literal}} expected-note{{import Foundation to use 'URL' as the default file reference literal type}}
+
+let text = #fileLiteral(resourceName: "TextFile.txt").relativeString! // expected-error{{type of expression is ambiguous without more context}}

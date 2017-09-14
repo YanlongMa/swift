@@ -2,13 +2,60 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
+
+// Generic functions implementable directly on FloatingPoint.
+@_transparent
+public func fabs<T: FloatingPoint>(_ x: T) -> T
+  where T.Magnitude == T {
+  return x.magnitude
+}
+
+@_transparent
+public func sqrt<T: FloatingPoint>(_ x: T) -> T {
+  return x.squareRoot()
+}
+
+@_transparent
+public func fma<T: FloatingPoint>(_ x: T, _ y: T, _ z: T) -> T {
+  return z.addingProduct(x, y)
+}
+
+@_transparent
+public func remainder<T: FloatingPoint>(_ x: T, _ y: T) -> T {
+  return x.remainder(dividingBy: y)
+}
+
+@_transparent
+public func fmod<T: FloatingPoint>(_ x: T, _ y: T) -> T {
+  return x.truncatingRemainder(dividingBy: y)
+}
+
+@_transparent
+public func ceil<T: FloatingPoint>(_ x: T) -> T {
+  return x.rounded(.up)
+}
+
+@_transparent
+public func floor<T: FloatingPoint>(_ x: T) -> T {
+  return x.rounded(.down)
+}
+
+@_transparent
+public func round<T: FloatingPoint>(_ x: T) -> T {
+  return x.rounded()
+}
+
+@_transparent
+public func trunc<T: FloatingPoint>(_ x: T) -> T {
+  return x.rounded(.towardZero)
+}
 
 %{
 
@@ -50,7 +97,7 @@ UnaryFunctions = [
     'acosh', 'asinh', 'atanh', 'cosh', 'sinh', 'tanh',
     'expm1',
     'log1p', 'logb',
-    'cbrt', 'sqrt', 'erf', 'erfc', 'tgamma',
+    'cbrt', 'erf', 'erfc', 'tgamma',
 ]
 
 # These functions have a corresponding LLVM intrinsic
@@ -60,14 +107,13 @@ UnaryIntrinsicFunctions = [
     'cos', 'sin',
     'exp', 'exp2',
     'log', 'log10', 'log2',
-    'fabs',
-    'ceil', 'floor', 'nearbyint', 'rint', 'round', 'trunc',
+    'nearbyint', 'rint',
 ]
 
 # (T, T) -> T
 BinaryFunctions = [
-    'atan2', 'hypot', 'pow', 'fmod',
-    'remainder', 'copysign', 'nextafter', 'fdim', 'fmax', 'fmin'
+    'atan2', 'hypot', 'pow',
+    'copysign', 'nextafter', 'fdim', 'fmax', 'fmin'
 ]
 
 # These functions have special implementations.
@@ -75,7 +121,7 @@ OtherFunctions = [
     'fpclassify',
     'isnormal', 'isfinite', 'isinf', 'isnan', 'signbit',
     'modf', 'ldexp', 'frexp', 'ilogb', 'scalbn', 'lgamma',
-    'remquo', 'nan', 'fma',
+    'remquo', 'nan',
     'jn', 'yn'
 ]
 
@@ -116,7 +162,6 @@ def TypedBinaryFunctions():
             yield floatName(bits), cFloatName(bits), cFuncSuffix(bits), bfunc
 
 }%
-
 
 // Unary functions
 // Note these do not have a corresponding LLVM intrinsic
@@ -171,11 +216,17 @@ public func fpclassify(_ value: ${T}) -> Int {
 %if T == 'Double':
 #if os(Linux)
   return Int(__fpclassify(CDouble(value)))
+#elseif os(Windows) 
+  return Int(_dclass(CDouble(value)))
 #else
   return Int(__fpclassifyd(CDouble(value)))
 #endif
 %else:
+#if os(Windows) 
+  return Int(_${f}dclass(${CT}(value)))
+#else
   return Int(__fpclassify${f}(${CT}(value)))
+#endif
 %end
 }
 
@@ -247,13 +298,15 @@ public func scalbn(_ x: ${T}, _ n: Int) -> ${T} {
 
 % # This is AllFloatTypes not OverlayFloatTypes because of the tuple return.
 % for T, CT, f in AllFloatTypes():
-#if os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Windows)
+#if os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin)
 @_transparent
 public func lgamma(_ x: ${T}) -> (${T}, Int) {
   var sign = Int32(0)
   let value = lgamma${f}_r(${CT}(x), &sign)
   return (${T}(value), Int(sign))
 }
+#elseif os(Windows)
+// TODO(compnerd): implement
 #else
 % # On Darwin platform,
 % # The real lgamma_r is not imported because it hides behind macro _REENTRANT.
@@ -265,7 +318,7 @@ func _swift_Darwin_lgamma${f}_r(_: ${CT},
 @_transparent
 public func lgamma(_ x: ${T}) -> (${T}, Int) {
   var sign = Int32(0)
-  let value = withUnsafeMutablePointer(&sign) { 
+  let value = withUnsafeMutablePointer(to: &sign) {
     (signp: UnsafeMutablePointer<Int32>) -> ${CT} in
     return _swift_Darwin_lgamma${f}_r(${CT}(x), signp)
   }
@@ -294,23 +347,23 @@ public func nan(_ tag: String) -> ${T} {
 
 % end
 
-% for T, CT, f in OverlayFloatTypes():
-@_transparent
-public func fma(_ x: ${T}, _ y: ${T}, _ z: ${T}) -> ${T} {
-  return ${T}(fma${f}(${CT}(x), ${CT}(y), ${CT}(z)))
-}
-
-% end
-
 % # These C functions only support double. The overlay fixes the Int parameter.
 @_transparent
 public func jn(_ n: Int, _ x: Double) -> Double {
+#if os(Windows)
+  return _jn(Int32(n), x)
+#else
   return jn(Int32(n), x)
+#endif
 }
 
 @_transparent
 public func yn(_ n: Int, _ x: Double) -> Double {
+#if os(Windows)
+  return _yn(Int32(n), x)
+#else
   return yn(Int32(n), x)
+#endif
 }
 
 % end

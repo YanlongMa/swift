@@ -1,6 +1,6 @@
-// RUN: rm -rf %t && mkdir -p %t
+// RUN: %empty-directory(%t)
 // RUN: %target-swift-frontend -emit-module %S/Inputs/PrivateObjC.swift -o %t
-// RUN: %target-parse-verify-swift -I %t
+// RUN: %target-typecheck-verify-swift -I %t -verify-ignore-unknown
 
 // REQUIRES: objc_interop
 import Foundation
@@ -130,12 +130,12 @@ obj.ext1()  // expected-warning {{result of call is unused}}
 obj.wonka()
 
 // Find class methods via dynamic method lookup.
-obj.dynamicType.staticFoo!(5)
-obj.dynamicType.staticWibble!()
+type(of: obj).staticFoo!(5)
+type(of: obj).staticWibble!()
 
 // Same as above but without the '!'
-obj.dynamicType.staticFoo(5)
-obj.dynamicType.staticWibble()
+type(of: obj).staticFoo(5)
+type(of: obj).staticWibble()
 
 // Overloading and ambiguity resolution
 
@@ -197,15 +197,15 @@ var prop3ResultB : (() -> Int)? = obj.prop3
 var prop3ResultC = obj.prop3
 let prop3ResultCChecked: Int? = prop3ResultC
 
-var obj2 : protocol<AnyObject, P> = Y()
+var obj2 : AnyObject & P = Y()
 
-class Z2 : AnyObject { }
+class Z2 { }
 class Z3<T : AnyObject> { }
-class Z4<T where T : AnyObject> { }
+class Z4<T> where T : AnyObject { }
 
 // Don't allow one to call instance methods on the Type via
 // dynamic method lookup.
-obj.dynamicType.foo!(obj)(5) // expected-error{{instance member 'foo' cannot be used on type 'Id' (aka 'AnyObject')}}
+type(of: obj).foo!(obj)(5) // expected-error{{instance member 'foo' cannot be used on type 'Id' (aka 'AnyObject')}}
 
 // Checked casts to AnyObject
 var p: P = Y()
@@ -219,3 +219,35 @@ uopt.wibble!()
 // Should not be able to see private or internal @objc methods.
 uopt.privateFoo!() // expected-error{{'privateFoo' is inaccessible due to 'private' protection level}}
 uopt.internalFoo!() // expected-error{{'internalFoo' is inaccessible due to 'internal' protection level}}
+
+let anyValue: Any = X()
+_ = anyValue.bar() // expected-error {{value of type 'Any' has no member 'bar'}}
+// expected-note@-1 {{cast 'Any' to 'AnyObject' or use 'as!' to force downcast to a more specific type to access members}}{{5-5=(}}{{13-13= as AnyObject)}}
+_ = (anyValue as AnyObject).bar()
+_ = (anyValue as! X).bar()
+
+var anyDict: [String : Any] = Dictionary<String, Any>()
+anyDict["test"] = anyValue
+_ = anyDict["test"]!.bar() // expected-error {{value of type 'Any' has no member 'bar'}}
+// expected-note@-1 {{cast 'Any' to 'AnyObject' or use 'as!' to force downcast to a more specific type to access members}}{{5-5=(}}{{21-21= as AnyObject)}}
+
+// Test that overload resolution during constraint solving of values
+// looked-up dynamically through AnyObject are treated as conforming
+// to the protocols they are supposed to conform to.
+class NSObjDerived1 : NSObject {
+  @objc var everything: [Any] = []
+}
+
+class NSObjDerived2 : NSObject {
+  var everything: Any = 1
+}
+
+func rdar29960565(_ o: AnyObject) {
+  for i in o.everything {
+    _ = i
+  }
+}
+
+// FIXME: Remove -verify-ignore-unknown.
+// <unknown>:0: error: unexpected note produced: 'privateFoo' declared here
+// <unknown>:0: error: unexpected note produced: 'internalFoo' declared here

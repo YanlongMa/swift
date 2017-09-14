@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 ///
@@ -22,17 +22,17 @@ import SwiftShims
 
 @_transparent
 public // @testable
-func _stdlib_atomicCompareExchangeStrongPtrImpl(
-  object target: UnsafeMutablePointer<UnsafeMutablePointer<Void>?>,
-  expected: UnsafeMutablePointer<UnsafeMutablePointer<Void>?>,
-  desired: UnsafeMutablePointer<Void>?) -> Bool {
+func _stdlib_atomicCompareExchangeStrongPtr(
+  object target: UnsafeMutablePointer<UnsafeRawPointer?>,
+  expected: UnsafeMutablePointer<UnsafeRawPointer?>,
+  desired: UnsafeRawPointer?) -> Bool {
 
   // We use Builtin.Word here because Builtin.RawPointer can't be nil.
   let (oldValue, won) = Builtin.cmpxchg_seqcst_seqcst_Word(
     target._rawValue,
     UInt(bitPattern: expected.pointee)._builtinWordValue,
     UInt(bitPattern: desired)._builtinWordValue)
-  expected.pointee = UnsafeMutablePointer(bitPattern: Int(oldValue))
+  expected.pointee = UnsafeRawPointer(bitPattern: Int(oldValue))
   return Bool(won)
 }
 
@@ -69,13 +69,18 @@ public // @testable
 func _stdlib_atomicCompareExchangeStrongPtr<T>(
   object target: UnsafeMutablePointer<UnsafeMutablePointer<T>${optional}>,
   expected: UnsafeMutablePointer<UnsafeMutablePointer<T>${optional}>,
-  desired: UnsafeMutablePointer<T>${optional}) -> Bool {
-  return _stdlib_atomicCompareExchangeStrongPtrImpl(
-    object: UnsafeMutablePointer(target),
-    expected: UnsafeMutablePointer(expected),
-    desired: UnsafeMutablePointer(desired))
+  desired: UnsafeMutablePointer<T>${optional}
+) -> Bool {
+  let rawTarget = UnsafeMutableRawPointer(target).assumingMemoryBound(
+    to: Optional<UnsafeRawPointer>.self)
+  let rawExpected = UnsafeMutableRawPointer(expected).assumingMemoryBound(
+    to: Optional<UnsafeRawPointer>.self)
+  return _stdlib_atomicCompareExchangeStrongPtr(
+    object: rawTarget,
+    expected: rawExpected,
+    desired: UnsafeRawPointer(desired))
 }
-% end
+% end # optional
 
 @_transparent
 @discardableResult
@@ -83,12 +88,12 @@ public // @testable
 func _stdlib_atomicInitializeARCRef(
   object target: UnsafeMutablePointer<AnyObject?>,
   desired: AnyObject) -> Bool {
-  var expected: UnsafeMutablePointer<Void>? = nil
+  var expected: UnsafeRawPointer?
   let desiredPtr = Unmanaged.passRetained(desired).toOpaque()
-  let wonRace = _stdlib_atomicCompareExchangeStrongPtrImpl(
-    object: UnsafeMutablePointer(target),
-    expected: &expected,
-    desired: desiredPtr)
+  let rawTarget = UnsafeMutableRawPointer(target).assumingMemoryBound(
+    to: Optional<UnsafeRawPointer>.self)
+  let wonRace = _stdlib_atomicCompareExchangeStrongPtr(
+    object: rawTarget, expected: &expected, desired: desiredPtr)
   if !wonRace {
     // Some other thread initialized the value.  Balance the retain that we
     // performed on 'desired'.
@@ -118,10 +123,11 @@ func _stdlib_atomicCompareExchangeStrongInt${bits}(
   object target: UnsafeMutablePointer<Int${bits}>,
   expected: UnsafeMutablePointer<Int${bits}>,
   desired: Int${bits}) -> Bool {
-  return _stdlib_atomicCompareExchangeStrongUInt${bits}(
-    object: UnsafeMutablePointer(target),
-    expected: UnsafeMutablePointer(expected),
-    desired: UInt${bits}(bitPattern: desired))
+
+  let (oldValue, won) = Builtin.cmpxchg_seqcst_seqcst_Int${bits}(
+    target._rawValue, expected.pointee._value, desired._value)
+  expected.pointee._value = oldValue
+  return Bool(won)
 }
 
 @_transparent
@@ -136,9 +142,8 @@ func _swift_stdlib_atomicStoreUInt${bits}(
 func _swift_stdlib_atomicStoreInt${bits}(
   object target: UnsafeMutablePointer<Int${bits}>,
   desired: Int${bits}) {
-  return _swift_stdlib_atomicStoreUInt${bits}(
-    object: UnsafeMutablePointer(target),
-    desired: UInt${bits}(bitPattern: desired))
+
+  Builtin.atomicstore_seqcst_Int${bits}(target._rawValue, desired._value)
 }
 
 public // @testable
@@ -151,9 +156,9 @@ func _swift_stdlib_atomicLoadUInt${bits}(
 
 func _swift_stdlib_atomicLoadInt${bits}(
   object target: UnsafeMutablePointer<Int${bits}>) -> Int${bits} {
-  return Int${bits}(bitPattern:
-    _swift_stdlib_atomicLoadUInt${bits}(
-      object: UnsafeMutablePointer(target)))
+
+  let value = Builtin.atomicload_seqcst_Int${bits}(target._rawValue)
+  return Int${bits}(value)
 }
 
 %   for operation in ['Add', 'And', 'Or', 'Xor']:
@@ -174,10 +179,11 @@ func _swift_stdlib_atomicFetch${operation}UInt${bits}(
 func _swift_stdlib_atomicFetch${operation}Int${bits}(
   object target: UnsafeMutablePointer<Int${bits}>,
   operand: Int${bits}) -> Int${bits} {
-  return Int${bits}(bitPattern:
-    _swift_stdlib_atomicFetch${operation}UInt${bits}(
-      object: UnsafeMutablePointer(target),
-      operand: UInt${bits}(bitPattern: operand)))
+
+  let value = Builtin.atomicrmw_${operation.lower()}_seqcst_Int${bits}(
+    target._rawValue, operand._value)
+
+  return Int${bits}(value)
 }
 %   end
 
@@ -188,29 +194,23 @@ func _stdlib_atomicCompareExchangeStrongInt(
   expected: UnsafeMutablePointer<Int>,
   desired: Int) -> Bool {
 #if arch(i386) || arch(arm)
-  return _stdlib_atomicCompareExchangeStrongUInt32(
-    object: UnsafeMutablePointer(target),
-    expected: UnsafeMutablePointer(expected),
-    desired: UInt32(bitPattern: Int32(desired)))
+  let (oldValue, won) = Builtin.cmpxchg_seqcst_seqcst_Int32(
+    target._rawValue, expected.pointee._value, desired._value)
 #elseif arch(x86_64) || arch(arm64) || arch(powerpc64) || arch(powerpc64le) || arch(s390x)
-  return _stdlib_atomicCompareExchangeStrongUInt64(
-    object: UnsafeMutablePointer(target),
-    expected: UnsafeMutablePointer(expected),
-    desired: UInt64(bitPattern: Int64(desired)))
+  let (oldValue, won) = Builtin.cmpxchg_seqcst_seqcst_Int64(
+    target._rawValue, expected.pointee._value, desired._value)
 #endif
+  expected.pointee._value = oldValue
+  return Bool(won)
 }
 
 func _swift_stdlib_atomicStoreInt(
   object target: UnsafeMutablePointer<Int>,
   desired: Int) {
 #if arch(i386) || arch(arm)
-  return _swift_stdlib_atomicStoreUInt32(
-    object: UnsafeMutablePointer(target),
-    desired: UInt32(bitPattern: Int32(desired)))
+  Builtin.atomicstore_seqcst_Int32(target._rawValue, desired._value)
 #elseif arch(x86_64) || arch(arm64) || arch(powerpc64) || arch(powerpc64le) || arch(s390x)
-  return _swift_stdlib_atomicStoreUInt64(
-    object: UnsafeMutablePointer(target),
-    desired: UInt64(bitPattern: Int64(desired)))
+  Builtin.atomicstore_seqcst_Int64(target._rawValue, desired._value)
 #endif
 }
 
@@ -218,23 +218,12 @@ func _swift_stdlib_atomicStoreInt(
 public func _swift_stdlib_atomicLoadInt(
   object target: UnsafeMutablePointer<Int>) -> Int {
 #if arch(i386) || arch(arm)
-  return Int(Int32(bitPattern:
-    _swift_stdlib_atomicLoadUInt32(
-      object: UnsafeMutablePointer(target))))
+  let value = Builtin.atomicload_seqcst_Int32(target._rawValue)
+  return Int(value)
 #elseif arch(x86_64) || arch(arm64) || arch(powerpc64) || arch(powerpc64le) || arch(s390x)
-  return Int(Int64(bitPattern:
-    _swift_stdlib_atomicLoadUInt64(
-      object: UnsafeMutablePointer(target))))
+  let value = Builtin.atomicload_seqcst_Int64(target._rawValue)
+  return Int(value)
 #endif
-}
-
-@_transparent
-public // @testable
-func _swift_stdlib_atomicLoadPtrImpl(
-  object target: UnsafeMutablePointer<OpaquePointer>
-) -> OpaquePointer? {
-  let value = Builtin.atomicload_seqcst_Word(target._rawValue)
-  return OpaquePointer(bitPattern: Int(value))
 }
 
 @_transparent
@@ -242,11 +231,9 @@ public // @testable
 func _stdlib_atomicLoadARCRef(
   object target: UnsafeMutablePointer<AnyObject?>
 ) -> AnyObject? {
-  let result = _swift_stdlib_atomicLoadPtrImpl(
-    object: UnsafeMutablePointer(target))
-  if let unwrapped = result {
-    return Unmanaged<AnyObject>.fromOpaque(
-      UnsafePointer(unwrapped)).takeUnretainedValue()
+  let value = Builtin.atomicload_seqcst_Word(target._rawValue)
+  if let unwrapped = UnsafeRawPointer(bitPattern: Int(value)) {
+    return Unmanaged<AnyObject>.fromOpaque(unwrapped).takeUnretainedValue()
   }
   return nil
 }
@@ -256,17 +243,17 @@ func _stdlib_atomicLoadARCRef(
 public func _swift_stdlib_atomicFetch${operation}Int(
   object target: UnsafeMutablePointer<Int>,
   operand: Int) -> Int {
+  let rawTarget = UnsafeMutableRawPointer(target)
 #if arch(i386) || arch(arm)
-  return Int(Int32(bitPattern:
-    _swift_stdlib_atomicFetch${operation}UInt32(
-      object: UnsafeMutablePointer(target),
-      operand: UInt32(bitPattern: Int32(operand)))))
+  let value = _swift_stdlib_atomicFetch${operation}Int32(
+    object: rawTarget.assumingMemoryBound(to: Int32.self),
+    operand: Int32(operand))
 #elseif arch(x86_64) || arch(arm64) || arch(powerpc64) || arch(powerpc64le) || arch(s390x)
-  return Int(Int64(bitPattern:
-    _swift_stdlib_atomicFetch${operation}UInt64(
-      object: UnsafeMutablePointer(target),
-      operand: UInt64(bitPattern: Int64(operand)))))
+  let value = _swift_stdlib_atomicFetch${operation}Int64(
+    object: rawTarget.assumingMemoryBound(to: Int64.self),
+    operand: Int64(operand))
 #endif
+  return Int(value)
 }
 % end
 
@@ -274,7 +261,8 @@ public final class _stdlib_AtomicInt {
   var _value: Int
 
   var _valuePtr: UnsafeMutablePointer<Int> {
-    return UnsafeMutablePointer(_getUnsafePointerToStoredProperties(self))
+    return _getUnsafePointerToStoredProperties(self).assumingMemoryBound(
+      to: Int.self)
   }
 
   public init(_ value: Int = 0) {
@@ -290,6 +278,7 @@ public final class _stdlib_AtomicInt {
   }
 
 % for operation_name, operation in [ ('Add', '+'), ('And', '&'), ('Or', '|'), ('Xor', '^') ]:
+  @discardableResult
   public func fetchAnd${operation_name}(_ operand: Int) -> Int {
     return _swift_stdlib_atomicFetch${operation_name}Int(
       object: _valuePtr,
@@ -318,23 +307,34 @@ public final class _stdlib_AtomicInt {
 
 /// A 32 byte buffer.
 internal struct _Buffer32 {
-  internal var _x0: UInt64 = 0
-  internal var _x1: UInt64 = 0
-  internal var _x2: UInt64 = 0
-  internal var _x3: UInt64 = 0
+% for i in range(32):
+  internal var _x${i}: UInt8 = 0
+% end
+
+  mutating func withBytes<Result>(
+    _ body: (UnsafeMutablePointer<UInt8>) throws -> Result
+  ) rethrows -> Result
+  {
+    return try withUnsafeMutablePointer(to: &self) {
+      try body(UnsafeMutableRawPointer($0).assumingMemoryBound(to: UInt8.self))
+    }
+  }
 }
 
 /// A 72 byte buffer.
 internal struct _Buffer72 {
-  internal var _x0: UInt64 = 0
-  internal var _x1: UInt64 = 0
-  internal var _x2: UInt64 = 0
-  internal var _x3: UInt64 = 0
-  internal var _x4: UInt64 = 0
-  internal var _x5: UInt64 = 0
-  internal var _x6: UInt64 = 0
-  internal var _x7: UInt64 = 0
-  internal var _x8: UInt64 = 0
+% for i in range(72):
+  internal var _x${i}: UInt8 = 0
+% end
+
+  mutating func withBytes<Result>(
+    _ body: (UnsafeMutablePointer<UInt8>) throws -> Result
+  ) rethrows -> Result
+  {
+    return try withUnsafeMutablePointer(to: &self) {
+      try body(UnsafeMutableRawPointer($0).assumingMemoryBound(to: UInt8.self))
+    }
+  }
 }
 
 % for bits in [ 32, 64, 80 ]:
@@ -374,18 +374,15 @@ func _float${bits}ToString(_ value: Float${bits}, debug: Bool) -> String {
     }
   }
 
-  _sanityCheck(sizeof(_Buffer32.self) == 32)
-  _sanityCheck(sizeof(_Buffer72.self) == 72)
+  _sanityCheck(MemoryLayout<_Buffer32>.size == 32)
+  _sanityCheck(MemoryLayout<_Buffer72>.size == 72)
 
   var buffer = _Buffer32()
-  return withUnsafeMutablePointer(&buffer) {
-    (bufferPtr) in
-    let bufferUTF8Ptr = UnsafeMutablePointer<UTF8.CodeUnit>(bufferPtr)
-    let actualLength = _float${bits}ToStringImpl(bufferUTF8Ptr, 32, value, debug)
+  return buffer.withBytes { (bufferPtr) in
+    let actualLength = _float${bits}ToStringImpl(bufferPtr, 32, value, debug)
     return String._fromWellFormedCodeUnitSequence(
       UTF8.self,
-      input: UnsafeBufferPointer(
-        start: bufferUTF8Ptr, count: Int(actualLength)))
+      input: UnsafeBufferPointer(start: bufferPtr, count: Int(actualLength)))
   }
 }
 
@@ -407,27 +404,21 @@ func _int64ToString(
 ) -> String {
   if radix >= 10 {
     var buffer = _Buffer32()
-    return withUnsafeMutablePointer(&buffer) {
-      (bufferPtr) in
-      let bufferUTF8Ptr = UnsafeMutablePointer<UTF8.CodeUnit>(bufferPtr)
-      let actualLength =
-        _int64ToStringImpl(bufferUTF8Ptr, 32, value, radix, uppercase)
+    return buffer.withBytes { (bufferPtr) in
+      let actualLength
+      = _int64ToStringImpl(bufferPtr, 32, value, radix, uppercase)
       return String._fromWellFormedCodeUnitSequence(
         UTF8.self,
-        input: UnsafeBufferPointer(
-          start: bufferUTF8Ptr, count: Int(actualLength)))
+        input: UnsafeBufferPointer(start: bufferPtr, count: Int(actualLength)))
     }
   } else {
     var buffer = _Buffer72()
-    return withUnsafeMutablePointer(&buffer) {
-      (bufferPtr) in
-      let bufferUTF8Ptr = UnsafeMutablePointer<UTF8.CodeUnit>(bufferPtr)
-      let actualLength =
-        _int64ToStringImpl(bufferUTF8Ptr, 72, value, radix, uppercase)
+    return buffer.withBytes { (bufferPtr) in
+      let actualLength
+      = _int64ToStringImpl(bufferPtr, 72, value, radix, uppercase)
       return String._fromWellFormedCodeUnitSequence(
         UTF8.self,
-        input: UnsafeBufferPointer(
-          start: bufferUTF8Ptr, count: Int(actualLength)))
+        input: UnsafeBufferPointer(start: bufferPtr, count: Int(actualLength)))
     }
   }
 }
@@ -444,39 +435,35 @@ func _uint64ToString(
 ) -> String {
   if radix >= 10 {
     var buffer = _Buffer32()
-    return withUnsafeMutablePointer(&buffer) {
-      (bufferPtr) in
-      let bufferUTF8Ptr = UnsafeMutablePointer<UTF8.CodeUnit>(bufferPtr)
-      let actualLength =
-        _uint64ToStringImpl(bufferUTF8Ptr, 32, value, radix, uppercase)
+    return buffer.withBytes { (bufferPtr) in
+      let actualLength
+      = _uint64ToStringImpl(bufferPtr, 32, value, radix, uppercase)
       return String._fromWellFormedCodeUnitSequence(
         UTF8.self,
-        input: UnsafeBufferPointer(
-          start: bufferUTF8Ptr, count: Int(actualLength)))
+        input: UnsafeBufferPointer(start: bufferPtr, count: Int(actualLength)))
     }
   } else {
     var buffer = _Buffer72()
-    return withUnsafeMutablePointer(&buffer) {
-      (bufferPtr) in
-      let bufferUTF8Ptr = UnsafeMutablePointer<UTF8.CodeUnit>(bufferPtr)
-      let actualLength =
-        _uint64ToStringImpl(bufferUTF8Ptr, 72, value, radix, uppercase)
+    return buffer.withBytes { (bufferPtr) in
+      let actualLength
+      = _uint64ToStringImpl(bufferPtr, 72, value, radix, uppercase)
       return String._fromWellFormedCodeUnitSequence(
         UTF8.self,
-        input: UnsafeBufferPointer(
-          start: bufferUTF8Ptr, count: Int(actualLength)))
+        input: UnsafeBufferPointer(start: bufferPtr, count: Int(actualLength)))
     }
   }
 }
 
+@_inlineable
+@_versioned
 func _rawPointerToString(_ value: Builtin.RawPointer) -> String {
   var result = _uint64ToString(
     UInt64(
-      UInt(bitPattern: UnsafePointer<Void>(value))),
+      UInt(bitPattern: UnsafeRawPointer(value))),
       radix: 16,
       uppercase: false
     )
-  for _ in 0..<(2 * sizeof(UnsafePointer<Void>.self) - result.utf16.count) {
+  for _ in 0..<(2 * MemoryLayout<UnsafeRawPointer>.size - result.utf16.count) {
     result = "0" + result
   }
   return "0x" + result
@@ -502,14 +489,10 @@ class _SwiftNativeNSSet {}
 @objc @_swift_native_objc_runtime_base(_SwiftNativeNSEnumeratorBase)
 class _SwiftNativeNSEnumerator {}
 
+// FIXME(ABI)#60 : move into the Foundation overlay and remove 'open'
 @objc @_swift_native_objc_runtime_base(_SwiftNativeNSDataBase)
-public class _SwiftNativeNSData {
-  public init() {}
-}
-
-@objc @_swift_native_objc_runtime_base(_SwiftNativeNSCharacterSetBase)
-public class _SwiftNativeNSCharacterSet {
-  public init() {}
+open class _SwiftNativeNSData {
+  @objc public init() {}
 }
 
 //===----------------------------------------------------------------------===//

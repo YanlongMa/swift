@@ -2,11 +2,11 @@
 #
 # This source file is part of the Swift.org open source project
 #
-# Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+# Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 # Licensed under Apache License v2.0 with Runtime Library Exception
 #
-# See http://swift.org/LICENSE.txt for license information
-# See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+# See https://swift.org/LICENSE.txt for license information
+# See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 #
 # ----------------------------------------------------------------------------
 
@@ -21,6 +21,16 @@ class Product(object):
         return cls.__name__.lower()
 
     @classmethod
+    def product_source_name(cls):
+        """product_source_name() -> str
+
+        The name of the source code directory of this product.
+        It provides a customization point for Product subclasses. It is set to
+        the value of product_name() by default for this reason.
+        """
+        return cls.product_name()
+
+    @classmethod
     def get_build_directory_name(cls, host_target):
         return "{}-{}".format(cls.product_name(),
                               host_target.name)
@@ -30,3 +40,4 @@ class Product(object):
         self.toolchain = toolchain
         self.source_dir = source_dir
         self.build_dir = build_dir
+        self.cmake_options = []

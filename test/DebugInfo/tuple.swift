@@ -1,10 +1,10 @@
-// RUN: %target-swift-frontend -primary-file %s -emit-ir -g -o - | FileCheck %s
+// RUN: %target-swift-frontend -primary-file %s -emit-ir -g -o - | %FileCheck %s
 // RUN: %target-swift-frontend -primary-file %s -emit-ir -gdwarf-types -o - \
-// RUN:   | FileCheck %s --check-prefix=DWARF
+// RUN:   | %FileCheck %s --check-prefix=DWARF
 
 // Don't emit a line number for tuple types. They are unnamed
 // and have no declaration, so the line number is nonsensical.
-// CHECK: !DICompositeType(tag: DW_TAG_structure_type, name: "_TtTSiSf_"
+// CHECK: !DICompositeType(tag: DW_TAG_structure_type, name: "_T0Si_SftD"
 // CHECK-NOT: line:
 // CHECK-NEXT: =
 let tuple1 : (Int, Float) = (1, 2.89)

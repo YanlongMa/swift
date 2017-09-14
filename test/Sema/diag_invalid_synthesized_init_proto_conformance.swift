@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 protocol P {
     init()
@@ -15,7 +15,7 @@ class C : B { }
 
 class D : B {
   init() {
-    super.init() // expected-error{{missing argument for parameter 'x' in call}}
+    super.init()
   }
 }
 

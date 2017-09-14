@@ -1,8 +1,6 @@
-// RUN: %target-build-swift -sanitize=thread %s -o %t_binary
-// RUN: TSAN_OPTIONS=ignore_interceptors_accesses=1:halt_on_error=1 %t_binary
+// RUN: %target-build-swift -sanitize=thread -target %sanitizers-target-triple %s -o %t_binary
+// RUN: %env-TSAN_OPTIONS=ignore_interceptors_accesses=1:halt_on_error=1 %target-run %t_binary
 // REQUIRES: executable_test
-// REQUIRES: CPU=x86_64
-// REQUIRES: OS=macosx
 // REQUIRES: tsan_runtime
 
 // Check that TSan does not report spurious races in witness table lookup.
@@ -27,7 +25,7 @@ protocol P {
   associatedtype E : Q, Q2
 }
 struct B<T : Q> : Q, Q2 {
-  static func foo() { consume(self.dynamicType) }
+  static func foo() { consume(type(of: self)) }
 }
 struct A<T : Q where T : Q2> : P {
   typealias E = B<T>
@@ -37,10 +35,10 @@ func foo<T : P>(_ t: T) {
   T.E.foo()
 }
 struct EasyType : Q, Q2 {
-    static func foo() { consume(self.dynamicType) }
+    static func foo() { consume(type(of: self)) }
 }
 extension Int : Q, Q2 {
-  static func foo() { consume(self.dynamicType) }
+  static func foo() { consume(type(of: self)) }
 }
 
 // Execute concurrently.

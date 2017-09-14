@@ -2,85 +2,44 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 @_exported import Foundation // Clang module
+import _SwiftFoundationOverlayShims
 
-public func ==(lhs: IndexSet.Index, rhs: IndexSet.Index) -> Bool {
-    return lhs.value == rhs.value && rhs.rangeIndex == rhs.rangeIndex
-}
-
-public func <(lhs: IndexSet.Index, rhs: IndexSet.Index) -> Bool {
-    return lhs.value < rhs.value && rhs.rangeIndex <= rhs.rangeIndex
-}
-
-public func <=(lhs: IndexSet.Index, rhs: IndexSet.Index) -> Bool {
-    return lhs.value <= rhs.value && rhs.rangeIndex <= rhs.rangeIndex
-}
-
-public func >(lhs: IndexSet.Index, rhs: IndexSet.Index) -> Bool {
-    return lhs.value > rhs.value && rhs.rangeIndex >= rhs.rangeIndex
-}
-
-public func >=(lhs: IndexSet.Index, rhs: IndexSet.Index) -> Bool {
-    return lhs.value >= rhs.value && rhs.rangeIndex >= rhs.rangeIndex
-}
-
-public func ==(lhs: IndexSet.RangeView, rhs: IndexSet.RangeView) -> Bool {
-    return lhs.startIndex == rhs.startIndex && lhs.endIndex == rhs.endIndex && lhs.indexSet == rhs.indexSet
-}
-
-// We currently cannot use this mechanism because NSIndexSet is not abstract; it has its own ivars and therefore subclassing it using the same trick as NSData, etc. does not work.
-
-/*
-private final class _SwiftNSIndexSet : _SwiftNativeNSIndexSet, _SwiftNativeFoundationType {
-    public typealias ImmutableType = NSIndexSet
-    public typealias MutableType = NSMutableIndexSet
-
-    var __wrapped : _MutableUnmanagedWrapper<ImmutableType, MutableType>
-
-    init(immutableObject: AnyObject) {
-      // Take ownership.
-      __wrapped = .Immutable(
-        Unmanaged.passRetained(
-          _unsafeReferenceCast(immutableObject, to: ImmutableType.self)))
-
-      super.init()
+extension IndexSet.Index {
+    public static func ==(lhs: IndexSet.Index, rhs: IndexSet.Index) -> Bool {
+        return lhs.value == rhs.value
     }
 
-    init(mutableObject: AnyObject) {
-      // Take ownership.
-      __wrapped = .Mutable(
-       Unmanaged.passRetained(
-         _unsafeReferenceCast(mutableObject, to: MutableType.self)))
-      super.init()
+    public static func <(lhs: IndexSet.Index, rhs: IndexSet.Index) -> Bool {
+        return lhs.value < rhs.value
     }
 
-    public required init(unmanagedImmutableObject: Unmanaged<ImmutableType>) {
-      // Take ownership.
-      __wrapped = .Immutable(unmanagedImmutableObject)
-
-      super.init()
+    public static func <=(lhs: IndexSet.Index, rhs: IndexSet.Index) -> Bool {
+        return lhs.value <= rhs.value
     }
 
-    public required init(unmanagedMutableObject: Unmanaged<MutableType>) {
-      // Take ownership.
-      __wrapped = .Mutable(unmanagedMutableObject)
-
-      super.init()
+    public static func >(lhs: IndexSet.Index, rhs: IndexSet.Index) -> Bool {
+        return lhs.value > rhs.value
     }
 
-    deinit {
-      releaseWrappedObject()
+    public static func >=(lhs: IndexSet.Index, rhs: IndexSet.Index) -> Bool {
+        return lhs.value >= rhs.value
     }
 }
-*/
+
+extension IndexSet.RangeView {
+    public static func ==(lhs: IndexSet.RangeView, rhs: IndexSet.RangeView) -> Bool {
+        return lhs.startIndex == rhs.startIndex && lhs.endIndex == rhs.endIndex && lhs.indexSet == rhs.indexSet
+    }
+}
 
 /// Manages a `Set` of integer values, which are commonly used as an index type in Cocoa API.
 ///
@@ -94,47 +53,21 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
     /// then calling `next()` on this view's iterator will produce 3 ranges before returning nil.
     public struct RangeView : Equatable, BidirectionalCollection {
         public typealias Index = Int
-        public let startIndex : Index
-        public let endIndex : Index
+        public let startIndex: Index
+        public let endIndex: Index
         
-        private var indexSet : IndexSet
+        fileprivate var indexSet: IndexSet
         
-        // Range of element values
-        private var intersectingRange : Range<IndexSet.Element>?
-        
-        private init(indexSet : IndexSet, intersecting range : Range<IndexSet.Element>?) {
-            self.indexSet = indexSet
-            self.intersectingRange = range
-            
+        fileprivate init(indexSet : IndexSet, intersecting range : Range<IndexSet.Element>?) {
             if let r = range {
-                if r.lowerBound == r.upperBound {
-                    startIndex = 0
-                    endIndex = 0
-                } else {
-                    let minIndex = indexSet._indexOfRange(containing: r.lowerBound)
-                    let maxIndex = indexSet._indexOfRange(containing: r.upperBound)
-                    
-                    switch (minIndex, maxIndex) {
-                    case (nil, nil):
-                        startIndex = 0
-                        endIndex = 0
-                    case (nil, .some(let max)):
-                        // Start is before our first range
-                        startIndex = 0
-                        endIndex = max + 1
-                    case (.some(let min), nil):
-                        // End is after our last range
-                        startIndex = min
-                        endIndex = indexSet._rangeCount
-                    case (.some(let min), .some(let max)):
-                        startIndex = min
-                        endIndex = max + 1
-                    }
-                }
+                let otherIndexes = IndexSet(integersIn: r)
+                self.indexSet = indexSet.intersection(otherIndexes)
             } else {
-                startIndex = 0
-                endIndex = indexSet._rangeCount
+                self.indexSet = indexSet
             }
+
+            self.startIndex = 0
+            self.endIndex = self.indexSet._rangeCount
         }
         
         public func makeIterator() -> IndexingIterator<RangeView> {
@@ -143,11 +76,7 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
         
         public subscript(index : Index) -> CountableRange<IndexSet.Element> {
             let indexSetRange = indexSet._range(at: index)
-            if let intersectingRange = intersectingRange {
-                return Swift.max(intersectingRange.lowerBound, indexSetRange.lowerBound)..<Swift.min(intersectingRange.upperBound, indexSetRange.upperBound)
-            } else {
-                return indexSetRange.lowerBound..<indexSetRange.upperBound
-            }
+            return indexSetRange.lowerBound..<indexSetRange.upperBound
         }
         
         public subscript(bounds: Range<Index>) -> BidirectionalSlice<RangeView> {
@@ -166,12 +95,12 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
     
     /// The mechanism for accessing the integers stored in an IndexSet.
     public struct Index : CustomStringConvertible, Comparable {
-        private var value : IndexSet.Element
-        private var extent : Range<IndexSet.Element>
-        private var rangeIndex : Int
-        private let rangeCount : Int
+        fileprivate var value: IndexSet.Element
+        fileprivate var extent: Range<IndexSet.Element>
+        fileprivate var rangeIndex: Int
+        fileprivate let rangeCount: Int
         
-        private init(value: Int, extent: Range<Int>, rangeIndex: Int, rangeCount: Int) {
+        fileprivate init(value: Int, extent: Range<Int>, rangeIndex: Int, rangeCount: Int) {
             self.value = value
             self.extent = extent
             self.rangeCount = rangeCount
@@ -186,7 +115,7 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
     public typealias ReferenceType = NSIndexSet
     public typealias Element = Int
     
-    private var _handle: _MutablePairHandle<NSIndexSet, NSMutableIndexSet>
+    fileprivate var _handle: _MutablePairHandle<NSIndexSet, NSMutableIndexSet>
     
     /// Initialize an `IndexSet` with a range of integers.
     public init(integersIn range: Range<Element>) {
@@ -210,7 +139,7 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
         _handle = _MutablePairHandle(NSIndexSet(), copying: false)
     }
     
-    public var hashValue : Int {
+    public var hashValue: Int {
         return _handle.map { $0.hash }
     }
     
@@ -226,7 +155,7 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
     /// Returns a `Range`-based view of the entire contents of `self`.
     ///
     /// - seealso: rangeView(of:)
-    public var rangeView : RangeView {
+    public var rangeView: RangeView {
         return RangeView(indexSet: self, intersecting: nil)
     }
 
@@ -253,9 +182,9 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
     
     private func _indexOfRange(containing integer : Element) -> RangeView.Index? {
         let result = _handle.map { 
-            __NSIndexSetIndexOfRangeContainingIndex($0, UInt(integer))
+            __NSIndexSetIndexOfRangeContainingIndex($0, integer)
         }
-        if result == UInt(NSNotFound) {
+        if result == NSNotFound {
             return nil
         } else {
             return Int(result)
@@ -264,9 +193,9 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
     
     private func _range(at index: RangeView.Index) -> Range<Element> {
         return _handle.map {
-            var location : UInt = 0
-            var length : UInt = 0
-            __NSIndexSetRangeAtIndex($0, UInt(index), &location, &length)
+            var location: Int = 0
+            var length: Int = 0
+            __NSIndexSetRangeAtIndex($0, index, &location, &length)
             return Int(location)..<Int(location)+Int(length)
         }
     }
@@ -278,16 +207,21 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
     }
     
     public var startIndex: Index {
-        // If this winds up being NSNotFound, that's ok because then endIndex is also NSNotFound, and empty collections have startIndex == endIndex
-        let extent = _range(at: 0)
-        return Index(value: extent.lowerBound, extent: extent, rangeIndex: 0, rangeCount: _rangeCount)
+        let rangeCount = _rangeCount
+        if rangeCount > 0 {
+            // If this winds up being NSNotFound, that's ok because then endIndex is also NSNotFound, and empty collections have startIndex == endIndex
+            let extent = _range(at: 0)
+            return Index(value: extent.lowerBound, extent: extent, rangeIndex: 0, rangeCount: _rangeCount)
+        } else {
+            return Index(value: 0, extent: 0..<0, rangeIndex: -1, rangeCount: rangeCount)
+        }
     }
 
     public var endIndex: Index {
         let rangeCount = _rangeCount
         let rangeIndex = rangeCount - 1
-        let extent : Range<Int>
-        let value : Int
+        let extent: Range<Int>
+        let value: Int
         if rangeCount > 0 {
             extent = _range(at: rangeCount - 1)
             value = extent.upperBound // "1 past the end" position is the last range, 1 + the end of that range's extent
@@ -323,45 +257,50 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
         return _handle.map { _toOptional($0.lastIndex) }
     }
     
-    /// Returns an integer contained in `self` which is greater than `integer`.
-    public func integerGreaterThan(_ integer: Element) -> Element {
-        return _handle.map { $0.indexGreaterThanIndex(integer) }
+    /// Returns an integer contained in `self` which is greater than `integer`, or `nil` if a result could not be found.
+    public func integerGreaterThan(_ integer: Element) -> Element? {
+        return _handle.map { _toOptional($0.indexGreaterThanIndex(integer)) }
     }
     
-    /// Returns an integer contained in `self` which is less than `integer`.
-    public func integerLessThan(_ integer: Element) -> Element {
-        return _handle.map { $0.indexLessThanIndex(integer) }
+    /// Returns an integer contained in `self` which is less than `integer`, or `nil` if a result could not be found.
+    public func integerLessThan(_ integer: Element) -> Element? {
+        return _handle.map { _toOptional($0.indexLessThanIndex(integer)) }
     }
     
-    /// Returns an integer contained in `self` which is greater than or equal to `integer`.
-    public func integerGreaterThanOrEqualTo(_ integer: Element) -> Element {
-        return _handle.map { $0.indexGreaterThanOrEqual(to: integer) }
+    /// Returns an integer contained in `self` which is greater than or equal to `integer`, or `nil` if a result could not be found.
+    public func integerGreaterThanOrEqualTo(_ integer: Element) -> Element? {
+        return _handle.map { _toOptional($0.indexGreaterThanOrEqual(to: integer)) }
     }
     
-    /// Returns an integer contained in `self` which is less than or equal to `integer`.
-    public func integerLessThanOrEqualTo(_ integer: Element) -> Element {
-        return _handle.map { $0.indexLessThanOrEqual(to: integer) }
+    /// Returns an integer contained in `self` which is less than or equal to `integer`, or `nil` if a result could not be found.
+    public func integerLessThanOrEqualTo(_ integer: Element) -> Element? {
+        return _handle.map { _toOptional($0.indexLessThanOrEqual(to: integer)) }
     }
     
     /// Return a `Range<IndexSet.Index>` which can be used to subscript the index set.
     ///
-    /// The resulting range is the range of the intersection of the integers in `range` with the index set.
+    /// The resulting range is the range of the intersection of the integers in `range` with the index set. The resulting range will be `isEmpty` if the intersection is empty.
     ///
     /// - parameter range: The range of integers to include.
     public func indexRange(in range: Range<Element>) -> Range<Index> {
-        if range.isEmpty {
+        guard !range.isEmpty, let first = first, let last = last else {
             let i = _index(ofInteger: 0)
             return i..<i
         }
-        
+
         if range.lowerBound > last || (range.upperBound - 1) < first {
             let i = _index(ofInteger: 0)
             return i..<i
         }
         
-        let resultFirst = _index(ofInteger: integerGreaterThanOrEqualTo(range.lowerBound))
-        let resultLast = _index(ofInteger: integerLessThanOrEqualTo(range.upperBound - 1))
-        return resultFirst..<index(after: resultLast)
+        if let start = integerGreaterThanOrEqualTo(range.lowerBound), let end = integerLessThanOrEqualTo(range.upperBound - 1) {
+            let resultFirst = _index(ofInteger: start)
+            let resultLast = _index(ofInteger: end)
+            return resultFirst..<index(after: resultLast)
+        } else {
+            let i = _index(ofInteger: 0)
+            return i..<i
+        }
     }
     
     /// Return a `Range<IndexSet.Index>` which can be used to subscript the index set.
@@ -414,7 +353,7 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
     public func contains(integersIn range: CountableClosedRange<Element>) -> Bool { return self.contains(integersIn: Range(range)) }
 
     
-    /// Returns `true` if `self` contains any of the integers in `indexSet`.
+    /// Returns `true` if `self` contains all of the integers in `indexSet`.
     public func contains(integersIn indexSet: IndexSet) -> Bool {
         return _handle.map { $0.contains(indexSet) }
     }
@@ -551,21 +490,19 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
 
         while let i = boundaryIterator.next() {
             if !flag {
-                // Starting a range; if the edge is contained or not depends on the xor of this particular value.
-                let startInclusive = self.contains(i) != other.contains(i)
-                start = startInclusive ? i : i + 1
-                flag = true
-            } else {
-                // Ending a range; if the edge is contained or not depends on the xor of this particular value.
-                let endInclusive = self.contains(i) != other.contains(i)
-                let end = endInclusive ? i + 1 : i
-                if start < end {
-                    // Otherwise, we had an empty range
-                    result.insert(integersIn: start..<end)
+                // Start a range if one set contains but not the other.
+                if self.contains(i) != other.contains(i) {
+                    flag = true
+                    start = i
                 }
-                flag = false
+            } else {
+                // End a range if both sets contain or both sets do not contain.
+                if self.contains(i) == other.contains(i) {
+                    flag = false
+                    result.insert(integersIn: start..<i)
+                }
             }
-            // We never have to worry about having flag set to false after exiting this loop because the iterator will always return an even number of results; ranges come in pairs, and we always alternate flag
+            // We never have to worry about having flag set to false after exiting this loop because the last boundary is guaranteed to be past the end of ranges in both index sets
         }
         
         return result
@@ -591,10 +528,10 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
                     start = i
                 }
             } else {
-                // If both sets contain then end a range.
-                if self.contains(i) && other.contains(i) {
+                // If both sets do not contain then end a range.
+                if !self.contains(i) || !other.contains(i) {
                     flag = false
-                    result.insert(integersIn: start..<(i + 1))
+                    result.insert(integersIn: start..<i)
                 }
             }
         }
@@ -673,10 +610,10 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
     ///
     /// - parameter range: A range of integers. For each integer in the range that intersects the integers in the IndexSet, then the `includeInteger` predicate will be invoked.
     /// - parameter includeInteger: The predicate which decides if an integer will be included in the result or not.
-    public func filteredIndexSet(in range : Range<Element>, includeInteger: @noescape (Element) throws -> Bool) rethrows -> IndexSet {
+    public func filteredIndexSet(in range : Range<Element>, includeInteger: (Element) throws -> Bool) rethrows -> IndexSet {
         let r : NSRange = _toNSRange(range)
         return try _handle.map {
-            var error : Error? = nil
+            var error: Error?
             let result = $0.indexes(in: r, options: [], passingTest: { (i, stop) -> Bool in
                 do {
                     let include = try includeInteger(i)
@@ -699,22 +636,22 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
     ///
     /// - parameter range: A range of integers. For each integer in the range that intersects the integers in the IndexSet, then the `includeInteger` predicate will be invoked.
     /// - parameter includeInteger: The predicate which decides if an integer will be included in the result or not.
-    public func filteredIndexSet(in range : CountableRange<Element>, includeInteger: @noescape (Element) throws -> Bool) rethrows -> IndexSet { return try self.filteredIndexSet(in: Range(range), includeInteger: includeInteger) }
+    public func filteredIndexSet(in range : CountableRange<Element>, includeInteger: (Element) throws -> Bool) rethrows -> IndexSet { return try self.filteredIndexSet(in: Range(range), includeInteger: includeInteger) }
     /// Returns an IndexSet filtered according to the result of `includeInteger`.
     ///
     /// - parameter range: A range of integers. For each integer in the range that intersects the integers in the IndexSet, then the `includeInteger` predicate will be invoked.
     /// - parameter includeInteger: The predicate which decides if an integer will be included in the result or not.
-    public func filteredIndexSet(in range : ClosedRange<Element>, includeInteger: @noescape (Element) throws -> Bool) rethrows -> IndexSet { return try self.filteredIndexSet(in: Range(range), includeInteger: includeInteger) }
+    public func filteredIndexSet(in range : ClosedRange<Element>, includeInteger: (Element) throws -> Bool) rethrows -> IndexSet { return try self.filteredIndexSet(in: Range(range), includeInteger: includeInteger) }
     /// Returns an IndexSet filtered according to the result of `includeInteger`.
     ///
     /// - parameter range: A range of integers. For each integer in the range that intersects the integers in the IndexSet, then the `includeInteger` predicate will be invoked.
     /// - parameter includeInteger: The predicate which decides if an integer will be included in the result or not.
-    public func filteredIndexSet(in range : CountableClosedRange<Element>, includeInteger: @noescape (Element) throws -> Bool) rethrows -> IndexSet { return try self.filteredIndexSet(in: Range(range), includeInteger: includeInteger) }
+    public func filteredIndexSet(in range : CountableClosedRange<Element>, includeInteger: (Element) throws -> Bool) rethrows -> IndexSet { return try self.filteredIndexSet(in: Range(range), includeInteger: includeInteger) }
     
     /// Returns an IndexSet filtered according to the result of `includeInteger`.
     ///
     /// - parameter includeInteger: The predicate which decides if an integer will be included in the result or not.
-    public func filteredIndexSet(includeInteger: @noescape (Element) throws -> Bool) rethrows -> IndexSet {
+    public func filteredIndexSet(includeInteger: (Element) throws -> Bool) rethrows -> IndexSet {
         return try self.filteredIndexSet(in: 0..<NSNotFound-1, includeInteger: includeInteger)
     }
 
@@ -722,25 +659,17 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
     public mutating func shift(startingAt integer: Element, by delta: IndexSet.IndexDistance) {
         _applyMutation { $0.shiftIndexesStarting(at: integer, by: delta) }
     }
-
-    public var description: String {
-        return _handle.map { $0.description }
-    }
-    
-    public var debugDescription: String {
-        return _handle.map { $0.debugDescription }
-    }
     
     // Temporary boxing function, until we can get a native Swift type for NSIndexSet
     @inline(__always)
-    mutating func _applyMutation<ReturnType>(_ whatToDo : @noescape (NSMutableIndexSet) throws -> ReturnType) rethrows -> ReturnType {
+    mutating func _applyMutation<ReturnType>(_ whatToDo : (NSMutableIndexSet) throws -> ReturnType) rethrows -> ReturnType {
         // This check is done twice because: <rdar://problem/24939065> Value kept live for too long causing uniqueness check to fail
         var unique = true
         switch _handle._pointer {
         case .Default(_):
             break
         case .Mutable(_):
-            unique = isUniquelyReferencedNonObjC(&_handle)
+            unique = isKnownUniquelyReferenced(&_handle)
         }
         
         switch _handle._pointer {
@@ -766,87 +695,106 @@ public struct IndexSet : ReferenceConvertible, Equatable, BidirectionalCollectio
     
     // MARK: - Bridging Support
     
-    private var reference: NSIndexSet {
+    fileprivate var reference: NSIndexSet {
         return _handle.reference
     }
     
-    private init(reference: NSIndexSet) {
+    fileprivate init(reference: NSIndexSet) {
         _handle = _MutablePairHandle(reference)
+    }
+}
+
+extension IndexSet : CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String {
+        return "\(count) indexes"
+    }
+    
+    public var debugDescription: String {
+        return "\(count) indexes"
+    }
+
+    public var customMirror: Mirror {
+        var c: [(label: String?, value: Any)] = []
+        c.append((label: "ranges", value: Array(rangeView)))
+        return Mirror(self, children: c, displayStyle: Mirror.DisplayStyle.struct)
     }
 }
 
 /// Iterate two index sets on the boundaries of their ranges. This is where all of the interesting stuff happens for exclusive or, intersect, etc.
 private struct IndexSetBoundaryIterator : IteratorProtocol {
-    private typealias Element = IndexSet.Element
+    typealias Element = IndexSet.Element
     
-    private var i1 : IndexSet.RangeView.Iterator
-    private var i2 : IndexSet.RangeView.Iterator
-    private var i1Range : CountableRange<Element>?
-    private var i2Range : CountableRange<Element>?
-    private var i1UsedFirst : Bool
-    private var i2UsedFirst : Bool
+    private var i1: IndexSet.RangeView.Iterator
+    private var i2: IndexSet.RangeView.Iterator
+    private var i1Range: CountableRange<Element>?
+    private var i2Range: CountableRange<Element>?
+    private var i1UsedLower: Bool
+    private var i2UsedLower: Bool
     
-    private init(_ is1 : IndexSet, _ is2 : IndexSet) {
+    fileprivate init(_ is1: IndexSet, _ is2: IndexSet) {
         i1 = is1.rangeView.makeIterator()
         i2 = is2.rangeView.makeIterator()
         
         i1Range = i1.next()
         i2Range = i2.next()
         
-        // A sort of cheap iterator on [i1Range.first, i1Range.last]
-        i1UsedFirst = false
-        i2UsedFirst = false
+        // A sort of cheap iterator on [i1Range.lowerBound, i1Range.upperBound]
+        i1UsedLower = false
+        i2UsedLower = false
     }
     
-    private mutating func next() -> Element? {
+    fileprivate mutating func next() -> Element? {
         if i1Range == nil && i2Range == nil {
             return nil
         }
         
-        let nextIn1 : Element
+        let nextIn1: Element
         if let r = i1Range {
-            nextIn1 = i1UsedFirst ? r.last! : r.first!
+            nextIn1 = i1UsedLower ? r.upperBound : r.lowerBound
         } else {
             nextIn1 = Int.max
         }
         
-        let nextIn2 : Element
+        let nextIn2: Element
         if let r = i2Range {
-            nextIn2 = i2UsedFirst ? r.last! : r.first!
+            nextIn2 = i2UsedLower ? r.upperBound : r.lowerBound
         } else {
             nextIn2 = Int.max
         }
         
-        var result : Element
+        var result: Element
         if nextIn1 <= nextIn2 {
-            // 1 has the next element, or they are the same. We need to iterate both the value from is1 and is2 in the == case.
+            // 1 has the next element, or they are the same.
             result = nextIn1
-            if i1UsedFirst { i1Range = i1.next() }
-            i1UsedFirst = !i1UsedFirst
+            if i1UsedLower { i1Range = i1.next() }
+            // We need to iterate both the value from is1 and is2 in the == case.
+            if result == nextIn2 {
+                if i2UsedLower { i2Range = i2.next() }
+                i2UsedLower = !i2UsedLower
+            }
+            i1UsedLower = !i1UsedLower
         } else {
             // 2 has the next element
             result = nextIn2
-            if i2UsedFirst { i2Range = i2.next() }
-            i2UsedFirst = !i2UsedFirst
+            if i2UsedLower { i2Range = i2.next() }
+            i2UsedLower = !i2UsedLower
         }
         
         return result
     }
 }
 
-public func ==(lhs: IndexSet, rhs: IndexSet) -> Bool {
-    return lhs._handle.map { $0.isEqual(to: rhs) }
+extension IndexSet {
+    public static func ==(lhs: IndexSet, rhs: IndexSet) -> Bool {
+        return lhs._handle.map { $0.isEqual(to: rhs) }
+    }
 }
 
-private func _toNSRange(_ r : Range<IndexSet.Element>) -> NSRange {
+private func _toNSRange(_ r: Range<IndexSet.Element>) -> NSRange {
     return NSMakeRange(r.lowerBound, r.upperBound - r.lowerBound)
 }
 
 extension IndexSet : _ObjectiveCBridgeable {
-    public static func _isBridgedToObjectiveC() -> Bool {
-        return true
-    }
-    
     public static func _getObjectiveCType() -> Any.Type {
         return NSIndexSet.self
     }
@@ -866,19 +814,19 @@ extension IndexSet : _ObjectiveCBridgeable {
     }
 
     public static func _unconditionallyBridgeFromObjectiveC(_ source: NSIndexSet?) -> IndexSet {
-        return IndexSet(reference: source!)
+        guard let src = source else { return IndexSet() }
+        return IndexSet(reference: src)
     }    
     
 }
 
-@_silgen_name("__NSIndexSetRangeCount")
-internal func __NSIndexSetRangeCount(_ indexSet: NSIndexSet) -> UInt
-
-@_silgen_name("__NSIndexSetRangeAtIndex")
-internal func __NSIndexSetRangeAtIndex(_ indexSet: NSIndexSet, _ index: UInt, _ location : UnsafeMutablePointer<UInt>, _ length : UnsafeMutablePointer<UInt>)
-
-@_silgen_name("__NSIndexSetIndexOfRangeContainingIndex")
-internal func __NSIndexSetIndexOfRangeContainingIndex(_ indexSet: NSIndexSet, _ index: UInt) -> UInt
+extension NSIndexSet : _HasCustomAnyHashableRepresentation {
+    // Must be @nonobjc to avoid infinite recursion during bridging.
+    @nonobjc
+    public func _toCustomAnyHashable() -> AnyHashable? {
+        return AnyHashable(self as IndexSet)
+    }
+}
 
 // MARK: Protocol
 
@@ -894,14 +842,15 @@ private enum _MutablePair<ImmutableType, MutableType> {
 /// A class type which acts as a handle (pointer-to-pointer) to a Foundation reference type which has both an immutable and mutable class (e.g., NSData, NSMutableData).
 ///
 /// a.k.a. Box
-private final class _MutablePairHandle<ImmutableType : NSObject, MutableType : NSObject where ImmutableType : NSMutableCopying, MutableType : NSMutableCopying> {
-    private var _pointer: _MutablePair<ImmutableType, MutableType>
+private final class _MutablePairHandle<ImmutableType : NSObject, MutableType : NSObject>
+  where ImmutableType : NSMutableCopying, MutableType : NSMutableCopying {
+    fileprivate var _pointer: _MutablePair<ImmutableType, MutableType>
     
     /// Initialize with an immutable reference instance.
     ///
     /// - parameter immutable: The thing to stash.
     /// - parameter copying: Should be true unless you just created the instance (or called copy) and want to transfer ownership to this handle.
-    init(_ immutable : ImmutableType, copying : Bool = true) {
+    init(_ immutable: ImmutableType, copying: Bool = true) {
         if copying {
             self._pointer = _MutablePair.Default(immutable.copy() as! ImmutableType)
         } else {
@@ -913,7 +862,7 @@ private final class _MutablePairHandle<ImmutableType : NSObject, MutableType : N
     ///
     /// - parameter mutable: The thing to stash.
     /// - parameter copying: Should be true unless you just created the instance (or called copy) and want to transfer ownership to this handle.
-    init(_ mutable : MutableType, copying : Bool = true) {
+    init(_ mutable: MutableType, copying: Bool = true) {
         if copying {
             self._pointer = _MutablePair.Mutable(mutable.mutableCopy() as! MutableType)
         } else {
@@ -923,23 +872,58 @@ private final class _MutablePairHandle<ImmutableType : NSObject, MutableType : N
     
     /// Apply a closure to the reference type, regardless if it is mutable or immutable.
     @inline(__always)
-    func map<ReturnType>(_ whatToDo : @noescape (ImmutableType) throws -> ReturnType) rethrows -> ReturnType {
+    func map<ReturnType>(_ whatToDo: (ImmutableType) throws -> ReturnType) rethrows -> ReturnType {
         switch _pointer {
         case .Default(let i):
             return try whatToDo(i)
         case .Mutable(let m):
             // TODO: It should be possible to reflect the constraint that MutableType is a subtype of ImmutableType in the generics for the class, but I haven't figured out how yet. For now, cheat and unsafe bit cast.
-            return try whatToDo(unsafeBitCast(m, to: ImmutableType.self))
+            return try whatToDo(unsafeDowncast(m, to: ImmutableType.self))
         }
     }
     
-    var reference : ImmutableType {
+    var reference: ImmutableType {
         switch _pointer {
         case .Default(let i):
             return i
         case .Mutable(let m):
             // TODO: It should be possible to reflect the constraint that MutableType is a subtype of ImmutableType in the generics for the class, but I haven't figured out how yet. For now, cheat and unsafe bit cast.
-            return unsafeBitCast(m, to: ImmutableType.self)
+            return unsafeDowncast(m, to: ImmutableType.self)
+        }
+    }
+}
+
+extension IndexSet : Codable {
+    private enum CodingKeys : Int, CodingKey {
+        case indexes
+    }
+
+    private enum RangeCodingKeys : Int, CodingKey {
+        case location
+        case length
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        var indexesContainer = try container.nestedUnkeyedContainer(forKey: .indexes)
+        self.init()
+
+        while !indexesContainer.isAtEnd {
+            let rangeContainer = try indexesContainer.nestedContainer(keyedBy: RangeCodingKeys.self)
+            let startIndex = try rangeContainer.decode(Int.self, forKey: .location)
+            let count = try rangeContainer.decode(Int.self, forKey: .length)
+            self.insert(integersIn: startIndex ..< (startIndex + count))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        var indexesContainer = container.nestedUnkeyedContainer(forKey: .indexes)
+
+        for range in self.rangeView {
+            var rangeContainer = indexesContainer.nestedContainer(keyedBy: RangeCodingKeys.self)
+            try rangeContainer.encode(range.startIndex, forKey: .location)
+            try rangeContainer.encode(range.count, forKey: .length)
         }
     }
 }

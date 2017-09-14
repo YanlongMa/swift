@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -20,11 +20,14 @@
 #include "swift/AST/CaptureInfo.h"
 #include "swift/AST/ConcreteDeclRef.h"
 #include "swift/AST/DeclNameLoc.h"
+#include "swift/AST/FunctionRefKind.h"
 #include "swift/AST/ProtocolConformanceRef.h"
 #include "swift/AST/TypeAlignments.h"
 #include "swift/AST/TypeLoc.h"
+#include "swift/AST/TypeRepr.h"
 #include "swift/AST/Availability.h"
 #include "llvm/Support/TrailingObjects.h"
+#include <utility>
 
 namespace llvm {
   struct fltSemantics;
@@ -38,6 +41,7 @@ namespace swift {
   class Type;
   class ValueDecl;
   class Decl;
+  class DeclRefExpr;
   class Pattern;
   class SubscriptDecl;
   class Stmt;
@@ -52,7 +56,7 @@ namespace swift {
   class PatternBindingDecl;
   class ParameterList;
   class EnumElementDecl;
-  
+
 enum class ExprKind : uint8_t {
 #define EXPR(Id, Parent) Id,
 #define EXPR_RANGE(Id, FirstId, LastId) \
@@ -60,10 +64,12 @@ enum class ExprKind : uint8_t {
 #include "swift/AST/ExprNodes.def"
 };
   
-/// Discriminates the different kinds of checked cast supported.
+/// Discriminates certain kinds of checked cast that have specialized diagnostic
+/// and/or code generation peephole behavior.
 ///
-/// This enumeration should not exist. Only the collection downcast kinds are
-/// currently significant. Please don't add new kinds.
+/// This enumeration should not have any semantic effect on the behavior of a
+/// well-typed program, since the runtime can perform all casts that are
+/// statically accepted.
 enum class CheckedCastKind : unsigned {
   /// The kind has not been determined yet.
   Unresolved,
@@ -73,24 +79,25 @@ enum class CheckedCastKind : unsigned {
 
   /// The requested cast is an implicit conversion, so this is a coercion.
   Coercion = First_Resolved,
-  /// A non-value-changing checked cast.
+  /// A checked cast with no known specific behavior.
   ValueCast,
   // A downcast from an array type to another array type.
   ArrayDowncast,
   // A downcast from a dictionary type to another dictionary type.
   DictionaryDowncast,
-  // A downcast from a dictionary type to another dictionary type that
-  // requires bridging.
-  DictionaryDowncastBridged,
   // A downcast from a set type to another set type.
   SetDowncast,
-  // A downcast from a set type to another set type that requires bridging.
-  SetDowncastBridged,
-  /// A downcast from an object of class or Objective-C existential
-  /// type to its bridged value type.
-  BridgeFromObjectiveC,
+  /// A bridging conversion that always succeeds.
+  BridgingCoercion,
+  /// A bridging conversion that may fail, because there are multiple Swift
+  /// value types that bridge to the same Cocoa object type.
+  ///
+  /// This kind is only used for Swift 3 compatibility diagnostics and is
+  /// treated the same as 'BridgingCoercion' otherwise. In Swift 4 or later,
+  /// any conversions with this kind show up as ValueCasts.
+  Swift3BridgingDowncast,
 
-  Last_CheckedCastKind = BridgeFromObjectiveC,
+  Last_CheckedCastKind = Swift3BridgingDowncast,
 };
 
 enum class AccessSemantics : unsigned char {
@@ -113,7 +120,7 @@ enum class AccessSemantics : unsigned char {
   /// polymorphism is expected.
   Ordinary,
 };
-  
+
 /// Expr - Base class for all expressions in swift.
 class alignas(8) Expr {
   Expr(const Expr&) = delete;
@@ -152,7 +159,7 @@ class alignas(8) Expr {
     friend class StringLiteralExpr;
     unsigned : NumLiteralExprBits;
 
-    unsigned Encoding : 2;
+    unsigned Encoding : 3;
     unsigned IsSingleUnicodeScalar : 1;
     unsigned IsSingleExtendedGraphemeCluster : 1;
   };
@@ -163,9 +170,19 @@ class alignas(8) Expr {
     friend class DeclRefExpr;
     unsigned : NumExprBits;
     unsigned Semantics : 2; // an AccessSemantics
+    unsigned FunctionRefKind : 2;
   };
-  enum { NumDeclRefExprBits = NumExprBits + 2 };
+  enum { NumDeclRefExprBits = NumExprBits + 4 };
   static_assert(NumDeclRefExprBits <= 32, "fits in an unsigned");
+
+  class UnresolvedDeclRefExprBitfields {
+    friend class UnresolvedDeclRefExpr;
+    unsigned : NumExprBits;
+    unsigned DeclRefKind : 2;
+    unsigned FunctionRefKind : 2;
+  };
+  enum { NumUnresolvedDeclRefExprBits = NumExprBits + 4 };
+  static_assert(NumUnresolvedDeclRefExprBits <= 32, "fits in an unsigned");
 
   class MemberRefExprBitfields {
     friend class MemberRefExpr;
@@ -192,29 +209,67 @@ class alignas(8) Expr {
   enum { NumTupleExprBits = NumExprBits + 3 };
   static_assert(NumTupleExprBits <= 32, "fits in an unsigned");
 
+  class UnresolvedDotExprBitfields {
+    friend class UnresolvedDotExpr;
+    unsigned : NumExprBits;
+    unsigned FunctionRefKind : 2;
+  };
+  enum { NumUnresolvedDotExprExprBits = NumExprBits + 2 };
+  static_assert(NumUnresolvedDotExprExprBits <= 32, "fits in an unsigned");
+
   class SubscriptExprBitfields {
     friend class SubscriptExpr;
     unsigned : NumExprBits;
     unsigned Semantics : 2; // an AccessSemantics
     unsigned IsSuper : 1;
+    /// # of argument labels stored after the SubscriptExpr.
+    unsigned NumArgLabels : 16;
+    /// Whether the SubscriptExpr also has source locations for the argument
+    /// label.
+    unsigned HasArgLabelLocs : 1;
+    /// Whether the last argument is a trailing closure.
+    unsigned HasTrailingClosure : 1;
   };
-  enum { NumSubscriptExprBits = NumExprBits + 3 };
+  enum { NumSubscriptExprBits = NumExprBits + 21 };
   static_assert(NumSubscriptExprBits <= 32, "fits in an unsigned");
+
+  class DynamicSubscriptExprBitfields {
+    friend class DynamicSubscriptExpr;
+    unsigned : NumExprBits;
+    /// # of argument labels stored after the DynamicSubscriptExpr.
+    unsigned NumArgLabels : 16;
+    /// Whether the DynamicSubscriptExpr also has source locations for the
+    /// argument label.
+    unsigned HasArgLabelLocs : 1;
+    /// Whether the last argument is a trailing closure.
+    unsigned HasTrailingClosure : 1;
+  };
+  enum { NumDynamicSubscriptExprBits = NumExprBits + 18 };
+  static_assert(NumDynamicSubscriptExprBits <= 32, "fits in an unsigned");
+
+  class UnresolvedMemberExprBitfields {
+    friend class UnresolvedMemberExpr;
+    unsigned : NumExprBits;
+    /// Whether the UnresolvedMemberExpr has arguments.
+    unsigned HasArguments : 1;
+    /// # of argument labels stored after the UnresolvedMemberExpr.
+    unsigned NumArgLabels : 16;
+    /// Whether the UnresolvedMemberExpr also has source locations for the
+    /// argument label.
+    unsigned HasArgLabelLocs : 1;
+    /// Whether the last argument is a trailing closure.
+    unsigned HasTrailingClosure : 1;
+  };
+  enum { NumUnresolvedMemberExprBits = NumExprBits + 19 };
+  static_assert(NumUnresolvedMemberExprBits <= 32, "fits in an unsigned");
 
   class OverloadSetRefExprBitfields {
     friend class OverloadSetRefExpr;
     unsigned : NumExprBits;
+    unsigned FunctionRefKind : 2;
   };
-  enum { NumOverloadSetRefExprBits = NumExprBits };
+  enum { NumOverloadSetRefExprBits = NumExprBits + 2};
   static_assert(NumOverloadSetRefExprBits <= 32, "fits in an unsigned");
-
-  class OverloadedMemberRefExprBitfields {
-    friend class OverloadedMemberRefExpr;
-    unsigned : NumOverloadSetRefExprBits;
-    unsigned Semantics : 2; // an AccessSemantics
-  };
-  enum { NumOverloadedMemberRefExprBits = NumOverloadSetRefExprBits + 2 };
-  static_assert(NumOverloadedMemberRefExprBits <= 32, "fits in an unsigned");
 
   class BooleanLiteralExprBitfields {
     friend class BooleanLiteralExpr;
@@ -235,6 +290,22 @@ class alignas(8) Expr {
   enum { NumMagicIdentifierLiteralExprBits = NumLiteralExprBits + 4 };
   static_assert(NumMagicIdentifierLiteralExprBits <= 32, "fits in an unsigned");
 
+  class ObjectLiteralExprBitfields {
+    friend class ObjectLiteralExpr;
+    unsigned : NumLiteralExprBits;
+
+    unsigned LitKind : 3;
+    /// # of argument labels stored after the ObjectLiteralExpr.
+    unsigned NumArgLabels : 16;
+    /// Whether the ObjectLiteralExpr also has source locations for the argument
+    /// label.
+    unsigned HasArgLabelLocs : 1;
+    /// Whether the last argument is a trailing closure.
+    unsigned HasTrailingClosure : 1;
+  };
+  enum { NumObjectLiteralExprBits = NumLiteralExprBits + 21 };
+  static_assert(NumObjectLiteralExprBits <= 32, "fits in an unsigned");
+
   class AbstractClosureExprBitfields {
     friend class AbstractClosureExpr;
     unsigned : NumExprBits;
@@ -254,12 +325,8 @@ class alignas(8) Expr {
     /// True if closure parameters were synthesized from anonymous closure
     /// variables.
     unsigned HasAnonymousClosureVars : 1;
-    
-    /// True if this is a closure created as a result of a void contextual
-    /// conversion.
-    unsigned IsVoidConversionClosure : 1;
   };
-  enum { NumClosureExprBits = NumAbstractClosureExprBits + 2 };
+  enum { NumClosureExprBits = NumAbstractClosureExprBits + 1 };
   static_assert(NumClosureExprBits <= 32, "fits in an unsigned");
 
   class BindOptionalExprBitfields {
@@ -275,10 +342,26 @@ class alignas(8) Expr {
   class TupleShuffleExprBitfields {
     friend class TupleShuffleExpr;
     unsigned : NumImplicitConversionExprBits;
-    unsigned IsSourceScalar : 1;
+    unsigned TypeImpact : 2;
   };
-  enum { NumTupleShuffleExprBits = NumImplicitConversionExprBits + 1 };
+  enum { NumTupleShuffleExprBits = NumImplicitConversionExprBits + 2 };
   static_assert(NumTupleShuffleExprBits <= 32, "fits in an unsigned");
+
+  class InOutToPointerExprBitfields {
+    friend class InOutToPointerExpr;
+    unsigned : NumImplicitConversionExprBits;
+    unsigned IsNonAccessing : 1;
+  };
+  enum { NumInOutToPointerExprBits = NumImplicitConversionExprBits + 1 };
+  static_assert(NumInOutToPointerExprBits <= 32, "fits in an unsigned");
+
+  class ArrayToPointerExprBitfields {
+    friend class ArrayToPointerExpr;
+    unsigned : NumImplicitConversionExprBits;
+    unsigned IsNonAccessing : 1;
+  };
+  enum { NumArrayToPointerExprBits = NumImplicitConversionExprBits + 1 };
+  static_assert(NumArrayToPointerExprBits <= 32, "fits in an unsigned");
 
   class ApplyExprBitfields {
     friend class ApplyExpr;
@@ -288,6 +371,19 @@ class alignas(8) Expr {
   };
   enum { NumApplyExprBits = NumExprBits + 2 };
   static_assert(NumApplyExprBits <= 32, "fits in an unsigned");
+
+  class CallExprBitfields {
+    friend class CallExpr;
+    unsigned : NumApplyExprBits;
+    /// # of argument labels stored after the CallExpr.
+    unsigned NumArgLabels : 16;
+    /// Whether the CallExpr also has source locations for the argument label.
+    unsigned HasArgLabelLocs : 1;
+    /// Whether the last argument is a trailing closure.
+    unsigned HasTrailingClosure : 1;
+  };
+  enum { NumCallExprBits = NumApplyExprBits + 18 };
+  static_assert(NumCallExprBits <= 32, "fits in an unsigned");
 
   enum { NumCheckedCastKindBits = 4 };
   class CheckedCastExprBitfields {
@@ -304,9 +400,8 @@ class alignas(8) Expr {
   class CollectionUpcastConversionExprBitfields {
     friend class CollectionUpcastConversionExpr;
     unsigned : NumExprBits;
-    unsigned BridgesToObjC : 1;
   };
-  enum { NumCollectionUpcastConversionExprBits = NumExprBits + 1 };
+  enum { NumCollectionUpcastConversionExprBits = NumExprBits + 0 };
   static_assert(NumCollectionUpcastConversionExprBits <= 32, "fits in an unsigned");
 
   class ObjCSelectorExprBitfields {
@@ -319,18 +414,15 @@ class alignas(8) Expr {
   enum { NumObjCSelectorExprBits = NumExprBits + 2 };
   static_assert(NumObjCSelectorExprBits <= 32, "fits in an unsigned");
 
-  class ObjCKeyPathExprBitfields {
-    friend class ObjCKeyPathExpr;
+  class KeyPathExprBitfields {
+    friend class KeyPathExpr;
     unsigned : NumExprBits;
 
-    /// The number of components in the selector path.
-    unsigned NumComponents : 8;
-
-    /// Whether the names have corresponding source locations.
-    unsigned HaveSourceLocations : 1;
+    /// Whether this is an ObjC stringified keypath.
+    unsigned IsObjC : 1;
   };
-  enum { NumObjCKeyPathExprBits = NumExprBits + 9 };
-  static_assert(NumObjCKeyPathExprBits <= 32, "fits in an unsigned");
+  enum { NumKeyPathExprBits = NumExprBits + 2 };
+  static_assert(NumKeyPathExprBits <= 32, "fits in an unsigned");
 
 protected:
   union {
@@ -339,22 +431,29 @@ protected:
     NumberLiteralExprBitfields NumberLiteralExprBits;
     StringLiteralExprBitfields StringLiteralExprBits;
     DeclRefExprBitfields DeclRefExprBits;
+    UnresolvedDeclRefExprBitfields UnresolvedDeclRefExprBits;
     TupleExprBitfields TupleExprBits;
     MemberRefExprBitfields MemberRefExprBits;
+    UnresolvedDotExprBitfields UnresolvedDotExprBits;
     SubscriptExprBitfields SubscriptExprBits;
+    DynamicSubscriptExprBitfields DynamicSubscriptExprBits;
+    UnresolvedMemberExprBitfields UnresolvedMemberExprBits;
     OverloadSetRefExprBitfields OverloadSetRefExprBits;
-    OverloadedMemberRefExprBitfields OverloadedMemberRefExprBits;
     BooleanLiteralExprBitfields BooleanLiteralExprBits;
     MagicIdentifierLiteralExprBitfields MagicIdentifierLiteralExprBits;
+    ObjectLiteralExprBitfields ObjectLiteralExprBits;
     AbstractClosureExprBitfields AbstractClosureExprBits;
     ClosureExprBitfields ClosureExprBits;
     BindOptionalExprBitfields BindOptionalExprBits;
     ApplyExprBitfields ApplyExprBits;
+    CallExprBitfields CallExprBits;
     CheckedCastExprBitfields CheckedCastExprBits;
     CollectionUpcastConversionExprBitfields CollectionUpcastConversionExprBits;
     TupleShuffleExprBitfields TupleShuffleExprBits;
+    InOutToPointerExprBitfields InOutToPointerExprBits;
+    ArrayToPointerExprBitfields ArrayToPointerExprBits;
     ObjCSelectorExprBitfields ObjCSelectorExprBits;
-    ObjCKeyPathExprBitfields ObjCKeyPathExprBits;
+    KeyPathExprBitfields KeyPathExprBits;
   };
 
 private:
@@ -432,6 +531,10 @@ public:
     return const_cast<Expr *>(this)->getValueProvidingExpr();
   }
 
+  /// If this is a reference to an operator written as a member of a type (or
+  /// extension thereof), return the underlying operator reference.
+  DeclRefExpr *getMemberOperatorRef();
+
   /// This recursively walks the AST rooted at this expression.
   Expr *walk(ASTWalker &walker);
   Expr *walk(ASTWalker &&walker) { return walk(walker); }
@@ -447,22 +550,22 @@ public:
   /// walk into the body of it (unless it is single-expression).
   void forEachChildExpr(const std::function<Expr*(Expr*)> &callback);
 
-  /// findExistingInitializerContext - Given that this expression is
-  /// an initializer that belongs in some sort of Initializer
-  /// context, look through it for any existing context object.
-  Initializer *findExistingInitializerContext();
-
   /// Determine whether this expression refers to a type by name.
   ///
   /// This distinguishes static references to types, like Int, from metatype
   /// values, "someTy: Any.Type".
-  bool isTypeReference() const;
+  bool isTypeReference(llvm::function_ref<Type(const Expr *)> getType =
+                           [](const Expr *E) -> Type {
+    return E->getType();
+  }) const;
 
   /// Determine whether this expression refers to a statically-derived metatype.
   ///
   /// This implies `isTypeReference`, but also requires that the referenced type
   /// is not an archetype or dependent type.
-  bool isStaticallyDerivedMetatype() const;
+  bool isStaticallyDerivedMetatype(
+      llvm::function_ref<Type(const Expr *)> getType =
+          [](const Expr *E) -> Type { return E->getType(); }) const;
 
   /// isImplicit - Determines whether this expression was implicitly-generated,
   /// rather than explicitly written in the AST.
@@ -493,6 +596,10 @@ public:
   /// \param allowOverwrite - true if it's okay if an expression already
   ///   has an access kind
   void propagateLValueAccessKind(AccessKind accessKind,
+                                 llvm::function_ref<Type(Expr *)> getType
+                                   = [](Expr *E) -> Type {
+                                     return E->getType();
+                                 },
                                  bool allowOverwrite = false);
 
   /// Retrieves the declaration that is being referenced by this
@@ -503,12 +610,25 @@ public:
   /// a base class.
   bool isSuperExpr() const;
 
-  /// Returns true if directly appending a parameter list would be syntactically
-  /// valid.
+  /// Returns whether the semantically meaningful content of this expression is
+  /// an inout expression.
   ///
-  /// Good examples: foo.bar, baz().
-  /// Bad examples: 
-  bool canAppendCallParentheses() const;
+  /// FIXME(Remove InOutType): This should eventually sub-in for
+  /// 'E->getType()->is<InOutType>()' in all cases.
+  bool isSemanticallyInOutExpr() const {
+    return getSemanticsProvidingExpr()->getKind() == ExprKind::InOut;
+  }
+  
+  /// Returns false if this expression needs to be wrapped in parens when
+  /// used inside of a any postfix expression, true otherwise.
+  ///
+  /// \param appendingPostfixOperator if the expression being
+  /// appended is a postfix operator like '!' or '?'.
+  bool canAppendPostfixExpression(bool appendingPostfixOperator = false) const;
+
+  /// Returns true if this is an infix operator of some sort, including
+  /// a builtin operator.
+  bool isInfixOperator() const;
 
   /// Produce a mapping from each subexpression to its parent
   /// expression, with the provided expression serving as the root of
@@ -548,6 +668,105 @@ public:
   }
 };
 
+/// Helper class to capture trailing call argument labels and related
+/// information, for expression nodes that involve argument labels, trailing
+/// closures, etc.
+template<typename Derived>
+class TrailingCallArguments
+    : private llvm::TrailingObjects<Derived, Identifier, SourceLoc> {
+  // We need to friend TrailingObjects twice here to work around an MSVC bug.
+  // If we have two functions of the same name with the parameter
+  // typename TrailingObjectsIdentifier::template OverloadToken<T> where T is
+  // different for each function, then MSVC reports a "member function already
+  // defined or declared" error, which is incorrect.
+  using TrailingObjectsIdentifier = llvm::TrailingObjects<Derived, Identifier>;
+  friend TrailingObjectsIdentifier;
+
+  using TrailingObjects = llvm::TrailingObjects<Derived, Identifier, SourceLoc>;
+  friend TrailingObjects;
+
+  Derived &asDerived() {
+    return *static_cast<Derived *>(this);
+  }
+
+  const Derived &asDerived() const {
+    return *static_cast<const Derived *>(this);
+  }
+
+  size_t numTrailingObjects(
+      typename TrailingObjectsIdentifier::template OverloadToken<Identifier>)
+      const {
+    return asDerived().getNumArguments();
+  }
+
+  size_t numTrailingObjects(
+      typename TrailingObjectsIdentifier::template OverloadToken<SourceLoc>)
+      const {
+    return asDerived().hasArgumentLabelLocs() ? asDerived().getNumArguments()
+                                              : 0;
+  }
+
+  /// Retrieve the buffer containing the argument labels.
+  MutableArrayRef<Identifier> getArgumentLabelsBuffer() {
+    return { this->template getTrailingObjects<Identifier>(),
+             asDerived().getNumArguments() };
+  }
+
+  /// Retrieve the buffer containing the argument label locations.
+  MutableArrayRef<SourceLoc> getArgumentLabelLocsBuffer() {
+    if (!asDerived().hasArgumentLabelLocs())
+      return { };
+    
+    return { this->template getTrailingObjects<SourceLoc>(),
+             asDerived().getNumArguments() };
+  }
+
+protected:
+  /// Determine the total size to allocate.
+  static size_t totalSizeToAlloc(ArrayRef<Identifier> argLabels,
+                                 ArrayRef<SourceLoc> argLabelLocs,
+                                 bool hasTrailingClosure) {
+    return TrailingObjects::template totalSizeToAlloc<Identifier, SourceLoc>(
+        argLabels.size(), argLabelLocs.size());
+  }
+
+  /// Initialize the actual call arguments.
+  void initializeCallArguments(ArrayRef<Identifier> argLabels,
+                               ArrayRef<SourceLoc> argLabelLocs,
+                               bool hasTrailingClosure) {
+    if (!argLabels.empty()) {
+      std::uninitialized_copy(argLabels.begin(), argLabels.end(),
+                              this->template getTrailingObjects<Identifier>());
+    }
+    
+    if (!argLabelLocs.empty())
+      std::uninitialized_copy(argLabelLocs.begin(), argLabelLocs.end(),
+                              this->template getTrailingObjects<SourceLoc>());
+  }
+
+public:
+  /// Retrieve the argument labels provided at the call site.
+  ArrayRef<Identifier> getArgumentLabels() const {
+    return { this->template getTrailingObjects<Identifier>(),
+             asDerived().getNumArguments() };
+  }
+
+  /// Retrieve the buffer containing the argument label locations.
+  ArrayRef<SourceLoc> getArgumentLabelLocs() const {
+    if (!asDerived().hasArgumentLabelLocs())
+      return { };
+    
+    return { this->template getTrailingObjects<SourceLoc>(),
+             asDerived().getNumArguments() };
+  }
+
+  /// Retrieve the location of the ith argument label.
+  SourceLoc getArgumentLabelLoc(unsigned i) const {
+    auto locs = getArgumentLabelLocs();
+    return i < locs.size() ? locs[i] : SourceLoc();
+  }
+};
+
 /// ErrorExpr - Represents a semantically erroneous subexpression in the AST,
 /// typically this will have an ErrorType.
 class ErrorExpr : public Expr {
@@ -572,10 +791,6 @@ public:
       Expr(ExprKind::CodeCompletion, /*Implicit=*/true, Ty),
       Range(Range) {}
 
-  CodeCompletionExpr(CharSourceRange Range, Type Ty = Type()) :
-      Expr(ExprKind::CodeCompletion, /*Implicit=*/true, Ty),
-      Range(SourceRange(Range.getStart(), Range.getEnd())) {}
-
   SourceRange getSourceRange() const { return Range; }
 
   static bool classof(const Expr *E) {
@@ -589,8 +804,11 @@ public:
   LiteralExpr(ExprKind Kind, bool Implicit) : Expr(Kind, Implicit) {}
   
   // Make an exact copy of this one AST node.
-  LiteralExpr *shallowClone(ASTContext &Ctx) const;
-  
+  LiteralExpr *
+  shallowClone(ASTContext &Ctx,
+               llvm::function_ref<void(Expr *, Type)> setType,
+               llvm::function_ref<Type(const Expr *)> getType) const;
+
   static bool classof(const Expr *E) {
     return E->getKind() >= ExprKind::First_LiteralExpr &&
            E->getKind() <= ExprKind::Last_LiteralExpr;
@@ -648,6 +866,14 @@ public:
       return DigitsLoc;
   }
 
+  SourceLoc getMinusLoc() const {
+    return MinusLoc;
+  }
+
+  SourceLoc getDigitsLoc() const {
+    return DigitsLoc;
+  }
+
   static bool classof(const Expr *E) {
     return E->getKind() >= ExprKind::First_NumberLiteralExpr
       && E->getKind() <= ExprKind::Last_NumberLiteralExpr;
@@ -667,7 +893,7 @@ public:
   {}
 
   APInt getValue() const;
-  static APInt getValue(StringRef Text, unsigned BitWidth);
+  static APInt getValue(StringRef Text, unsigned BitWidth, bool Negative);
 
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::IntegerLiteral;
@@ -684,7 +910,8 @@ public:
   {}
   
   APFloat getValue() const;
-  static APFloat getValue(StringRef Text, const llvm::fltSemantics &Semantics);
+  static APFloat getValue(StringRef Text, const llvm::fltSemantics &Semantics,
+                          bool Negative);
   
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::FloatLiteral;
@@ -714,13 +941,13 @@ public:
   }
 };
   
-/// StringLiteralExpr - String literal, like '"foo"'.  After semantic
-/// analysis assigns types, this is guaranteed to only have a
-/// BuiltinRawPointerType.
+/// StringLiteralExpr - String literal, like '"foo"'.
 class StringLiteralExpr : public LiteralExpr {
   StringRef Val;
   SourceRange Range;
-  
+  ConcreteDeclRef BuiltinInitializer;
+  ConcreteDeclRef Initializer;
+
 public:
   /// The encoding that should be used for the string literal.
   enum Encoding : unsigned {
@@ -729,6 +956,12 @@ public:
 
     /// A UTF-16 string.
     UTF16,
+
+    /// A UTF-8 constant string.
+    UTF8ConstString,
+
+    /// A UTF-16 constant string.
+    UTF16ConstString,
 
     /// A single UnicodeScalar, passed as an integer.
     OneUnicodeScalar
@@ -757,6 +990,32 @@ public:
     return StringLiteralExprBits.IsSingleExtendedGraphemeCluster;
   }
 
+  /// Retrieve the builtin initializer that will be used to construct the string
+  /// literal.
+  ///
+  /// Any type-checked string literal will have a builtin initializer, which is
+  /// called first to form a concrete Swift type.
+  ConcreteDeclRef getBuiltinInitializer() const { return BuiltinInitializer; }
+
+  /// Set the builtin initializer that will be used to construct the string
+  /// literal.
+  void setBuiltinInitializer(ConcreteDeclRef builtinInitializer) {
+    BuiltinInitializer = builtinInitializer;
+  }
+
+  /// Retrieve the initializer that will be used to construct the string
+  /// literal from the result of the initializer.
+  ///
+  /// Only string literals that have no builtin literal conformance will have
+  /// this initializer, which will be called on the result of the builtin
+  /// initializer.
+  ConcreteDeclRef getInitializer() const { return Initializer; }
+
+  /// Set the initializer that will be used to construct the string literal.
+  void setInitializer(ConcreteDeclRef initializer) {
+    Initializer = initializer;
+  }
+
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::StringLiteral;
   }
@@ -771,6 +1030,7 @@ public:
 /// "[\(min)..\(max)]"
 /// \endcode
 class InterpolatedStringLiteralExpr : public LiteralExpr {
+  /// Points at the beginning quote.
   SourceLoc Loc;
   MutableArrayRef<Expr *> Segments;
   Expr *SemanticExpr;
@@ -789,10 +1049,12 @@ public:
   void setSemanticExpr(Expr *SE) { SemanticExpr = SE; }
   
   SourceLoc getStartLoc() const {
-    return Segments.front()->getStartLoc();
+    return Loc;
   }
   SourceLoc getEndLoc() const {
-    return Segments.back()->getEndLoc();
+    // SourceLocs are token based, and the interpolated string is one string
+    // token, so the range should be (Start == End).
+    return Loc;
   }
   
   static bool classof(const Expr *E) {
@@ -809,7 +1071,9 @@ public:
   };
 private:
   SourceLoc Loc;
-  
+  ConcreteDeclRef BuiltinInitializer;
+  ConcreteDeclRef Initializer;
+
 public:
   MagicIdentifierLiteralExpr(Kind kind, SourceLoc loc, bool implicit = false)
     : LiteralExpr(ExprKind::MagicIdentifierLiteral, implicit), Loc(loc) {
@@ -840,10 +1104,6 @@ public:
     llvm_unreachable("bad Kind");
   }
 
-  bool isDSOHandle() const {
-    return getKind() == DSOHandle;
-  }
-
   SourceRange getSourceRange() const { return Loc; }
 
   // For a magic identifier that produces a string literal, retrieve the
@@ -862,6 +1122,40 @@ public:
       = static_cast<unsigned>(encoding);
   }
 
+  /// Retrieve the builtin initializer that will be used to construct the string
+  /// literal.
+  ///
+  /// Any type-checked string literal will have a builtin initializer, which is
+  /// called first to form a concrete Swift type.
+  ConcreteDeclRef getBuiltinInitializer() const {
+    assert(isString() && "Magic identifier literal is not a string");
+    return BuiltinInitializer;
+  }
+
+  /// Set the builtin initializer that will be used to construct the string
+  /// literal.
+  void setBuiltinInitializer(ConcreteDeclRef builtinInitializer) {
+    assert(isString() && "Magic identifier literal is not a string");
+    BuiltinInitializer = builtinInitializer;
+  }
+
+  /// Retrieve the initializer that will be used to construct the string
+  /// literal from the result of the initializer.
+  ///
+  /// Only string literals that have no builtin literal conformance will have
+  /// this initializer, which will be called on the result of the builtin
+  /// initializer.
+  ConcreteDeclRef getInitializer() const {
+    assert(isString() && "Magic identifier literal is not a string");
+    return Initializer;
+  }
+
+  /// Set the initializer that will be used to construct the string literal.
+  void setInitializer(ConcreteDeclRef initializer) {
+    assert(isString() && "Magic identifier literal is not a string");
+    Initializer = initializer;
+  }
+
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::MagicIdentifierLiteral;
   }
@@ -871,31 +1165,66 @@ public:
 // '#colorLiteral(red: 1, blue: 0, green: 0, alpha: 1)' with a name and a list
 // argument. The components of the list argument are meant to be themselves
 // constant.
-class ObjectLiteralExpr : public LiteralExpr {
+class ObjectLiteralExpr final
+    : public LiteralExpr,
+      public TrailingCallArguments<ObjectLiteralExpr> {
 public:
   /// The kind of object literal.
   enum LiteralKind : unsigned {
 #define POUND_OBJECT_LITERAL(Name, Desc, Proto) Name,
-#include "swift/Parse/Tokens.def"    
+#include "swift/Syntax/TokenKinds.def"
   };
 
 private:
-  LiteralKind LitKind;
   Expr *Arg;
   Expr *SemanticExpr;
   SourceLoc PoundLoc;
 
-public:
   ObjectLiteralExpr(SourceLoc PoundLoc, LiteralKind LitKind,
-                    Expr *Arg, bool implicit = false)
-    : LiteralExpr(ExprKind::ObjectLiteral, implicit), 
-      LitKind(LitKind), Arg(Arg), SemanticExpr(nullptr),
-      PoundLoc(PoundLoc) {}
+                    Expr *Arg,
+                    ArrayRef<Identifier> argLabels,
+                    ArrayRef<SourceLoc> argLabelLocs,
+                    bool hasTrailingClosure,
+                    bool implicit);
 
-  LiteralKind getLiteralKind() const { return LitKind; }
+public:
+  /// Create a new object literal expression.
+  ///
+  /// Note: prefer to use the second entry point, which separates out
+  /// arguments/labels/etc.
+  static ObjectLiteralExpr *
+  create(ASTContext &ctx, SourceLoc poundLoc, LiteralKind kind, Expr *arg,
+         bool implicit, llvm::function_ref<Type(const Expr *)> getType);
+
+  /// Create a new object literal expression.
+  static ObjectLiteralExpr *create(ASTContext &ctx, SourceLoc poundLoc,
+                                   LiteralKind kind,
+                                   SourceLoc lParenLoc,
+                                   ArrayRef<Expr *> args,
+                                   ArrayRef<Identifier> argLabels,
+                                   ArrayRef<SourceLoc> argLabelLocs,
+                                   SourceLoc rParenLoc,
+                                   Expr *trailingClosure,
+                                   bool implicit);
+
+  LiteralKind getLiteralKind() const {
+    return static_cast<LiteralKind>(ObjectLiteralExprBits.LitKind);
+  }
 
   Expr *getArg() const { return Arg; }
   void setArg(Expr *arg) { Arg = arg; }
+
+  unsigned getNumArguments() const {
+    return ObjectLiteralExprBits.NumArgLabels;
+  }
+  bool hasArgumentLabelLocs() const {
+    return ObjectLiteralExprBits.HasArgLabelLocs;
+  }
+
+  /// Whether this call with written with a trailing closure.
+  bool hasTrailingClosure() const {
+    return ObjectLiteralExprBits.HasTrailingClosure;
+  }
 
   Expr *getSemanticExpr() const { return SemanticExpr; }
   void setSemanticExpr(Expr *expr) { SemanticExpr = expr; }
@@ -934,28 +1263,19 @@ public:
 
 /// DeclRefExpr - A reference to a value, "x".
 class DeclRefExpr : public Expr {
-  /// This is used when the reference is specialized, e.g "GenCls<Int>", to
-  /// hold information about the generic arguments.
-  struct SpecializeInfo {
-    ConcreteDeclRef D;
-    ArrayRef<TypeRepr*> GenericArgs;
-  };
-
-  /// \brief The declaration pointer or SpecializeInfo pointer if it was
-  /// explicitly specialized with <...>.
-  llvm::PointerUnion<ConcreteDeclRef, SpecializeInfo *> DOrSpecialized;
+  /// \brief The declaration pointer.
+  ConcreteDeclRef D;
   DeclNameLoc Loc;
-
-  SpecializeInfo *getSpecInfo() const {
-    return DOrSpecialized.dyn_cast<SpecializeInfo*>();
-  }
 
 public:
   DeclRefExpr(ConcreteDeclRef D, DeclNameLoc Loc, bool Implicit,
               AccessSemantics semantics = AccessSemantics::Ordinary,
               Type Ty = Type())
-    : Expr(ExprKind::DeclRef, Implicit, Ty), DOrSpecialized(D), Loc(Loc) {
+    : Expr(ExprKind::DeclRef, Implicit, Ty), D(D), Loc(Loc) {
     DeclRefExprBits.Semantics = (unsigned) semantics;
+    DeclRefExprBits.FunctionRefKind =
+      static_cast<unsigned>(Loc.isCompound() ? FunctionRefKind::Compound
+                                             : FunctionRefKind::Unapplied);
   }
 
   /// Retrieve the declaration to which this expression refers.
@@ -971,32 +1291,22 @@ public:
 
   /// Retrieve the concrete declaration reference.
   ConcreteDeclRef getDeclRef() const {
-    if (auto Spec = getSpecInfo())
-      return Spec->D;
-    return DOrSpecialized.get<ConcreteDeclRef>();
+    return D;
   }
 
-  void setSpecialized();
-
-  /// \brief Determine whether this declaration reference was immediately
-  /// specialized by <...>.
-  bool isSpecialized() const { return getSpecInfo() != nullptr; }
-
-  /// Set the generic arguments.
-  ///
-  /// This copies the array using ASTContext's allocator.
-  void setGenericArgs(ArrayRef<TypeRepr*> GenericArgs);
-
-  /// Returns the generic arguments if it was specialized or an empty array
-  /// otherwise.
-  ArrayRef<TypeRepr *> getGenericArgs() const {
-    if (auto Spec = getSpecInfo())
-      return Spec->GenericArgs;
-    return ArrayRef<TypeRepr *>();
-  }
   SourceRange getSourceRange() const { return Loc.getSourceRange(); }
   SourceLoc getLoc() const { return Loc.getBaseNameLoc(); }
   DeclNameLoc getNameLoc() const { return Loc; }
+
+  /// Retrieve the kind of function reference.
+  FunctionRefKind getFunctionRefKind() const {
+    return static_cast<FunctionRefKind>(DeclRefExprBits.FunctionRefKind);
+  }
+
+  /// Set the kind of function reference.
+  void setFunctionRefKind(FunctionRefKind refKind) {
+    DeclRefExprBits.FunctionRefKind = static_cast<unsigned>(refKind);
+  }
 
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::DeclRef;
@@ -1031,20 +1341,18 @@ class TypeExpr : public Expr {
   TypeLoc Info;
   TypeExpr(Type Ty);
 public:
-  /// Whether this type reference actually references an instance but has been
-  /// promoted to a type reference to access an enum element
-  ///
-  /// This is purely transitional and will be removed when referencing enum
-  /// elements on instance members becomes an error
-  bool IsPromotedInstanceRef = false;
-
   // Create a TypeExpr with location information.
   TypeExpr(TypeLoc Ty);
 
   // The type of a TypeExpr is always a metatype type.  Return the instance
   // type, ErrorType if an error, or null if not set yet.
-  Type getInstanceType() const;
-  
+  Type getInstanceType(llvm::function_ref<bool(const Expr *)> hasType =
+                           [](const Expr *E) -> bool { return !!E->getType(); },
+                       llvm::function_ref<Type(const Expr *)> getType =
+                           [](const Expr *E) -> Type {
+                         return E->getType();
+                       }) const;
+
   // Create an implicit TypeExpr, which has no location information.
   static TypeExpr *createImplicit(Type Ty, ASTContext &C) {
     return new (C) TypeExpr(Ty);
@@ -1056,13 +1364,32 @@ public:
   static TypeExpr *createImplicitHack(SourceLoc Loc, Type Ty, ASTContext &C);
 
   
-  /// Return a TypeExpr for a TypeDecl and the specified location.
+  /// Create a TypeExpr for a TypeDecl at the specified location.
   static TypeExpr *createForDecl(SourceLoc Loc, TypeDecl *D,
-                                 bool isImplicit,
-                                 bool isPromotedInstanceRef = false);
-  static TypeExpr *createForSpecializedDecl(SourceLoc Loc, TypeDecl *D,
-                                            ArrayRef<TypeRepr*> args,
-                                            SourceRange angleLocs);
+                                 DeclContext *DC,
+                                 bool isImplicit);
+
+  /// Create a TypeExpr for a member TypeDecl of the given parent TypeDecl.
+  static TypeExpr *createForMemberDecl(SourceLoc ParentNameLoc,
+                                       TypeDecl *Parent,
+                                       SourceLoc NameLoc,
+                                       TypeDecl *Decl);
+
+  /// Create a TypeExpr for a member TypeDecl of the given parent IdentTypeRepr.
+  static TypeExpr *createForMemberDecl(IdentTypeRepr *ParentTR,
+                                       SourceLoc NameLoc,
+                                       TypeDecl *Decl);
+
+  /// Create a TypeExpr from an IdentTypeRepr with the given arguments applied
+  /// at the specified location.
+  ///
+  /// Returns nullptr if the reference cannot be formed, which is a hack due
+  /// to limitations in how we model generic typealiases.
+  static TypeExpr *createForSpecializedDecl(IdentTypeRepr *ParentTR,
+                                            ArrayRef<TypeRepr*> Args,
+                                            SourceRange AngleLocs,
+                                            ASTContext &C);
+
   TypeLoc &getTypeLoc() { return Info; }
   TypeLoc getTypeLoc() const { return Info; }
   TypeRepr *getTypeRepr() const { return Info.getTypeRepr(); }
@@ -1116,13 +1443,20 @@ class OverloadSetRefExpr : public Expr {
   ArrayRef<ValueDecl*> Decls;
 
 protected:
-  OverloadSetRefExpr(ExprKind Kind, ArrayRef<ValueDecl*> decls, bool Implicit,
-                     Type Ty)
-    : Expr(Kind, Implicit, Ty), Decls(decls) {}
+  OverloadSetRefExpr(ExprKind Kind, ArrayRef<ValueDecl*> decls,
+                     FunctionRefKind functionRefKind, bool Implicit, Type Ty)
+      : Expr(Kind, Implicit, Ty), Decls(decls) {
+    OverloadSetRefExprBits.FunctionRefKind =
+      static_cast<unsigned>(functionRefKind);
+  }
 
 public:
   ArrayRef<ValueDecl*> getDecls() const { return Decls; }
-  
+
+  void setDecls(ArrayRef<ValueDecl *> domain) {
+    Decls = domain;
+  }
+
   /// getBaseType - Determine the type of the base object provided for the
   /// given overload set, which is only non-null when dealing with an overloaded
   /// member reference.
@@ -1132,6 +1466,17 @@ public:
   /// concrete base object (which is not a metatype).
   bool hasBaseObject() const;
 
+  /// Retrieve the kind of function reference.
+  FunctionRefKind getFunctionRefKind() const {
+    return static_cast<FunctionRefKind>(
+             OverloadSetRefExprBits.FunctionRefKind);
+  }
+
+  /// Set the kind of function reference.
+  void setFunctionRefKind(FunctionRefKind refKind) {
+    OverloadSetRefExprBits.FunctionRefKind = static_cast<unsigned>(refKind);
+  }
+
   static bool classof(const Expr *E) {
     return E->getKind() >= ExprKind::First_OverloadSetRefExpr &&
            E->getKind() <= ExprKind::Last_OverloadSetRefExpr;
@@ -1140,75 +1485,24 @@ public:
 
 /// OverloadedDeclRefExpr - A reference to an overloaded name that should
 /// eventually be resolved (by overload resolution) to a value reference.
-class OverloadedDeclRefExpr : public OverloadSetRefExpr {
+class OverloadedDeclRefExpr final : public OverloadSetRefExpr {
   DeclNameLoc Loc;
-  bool IsSpecialized = false;
-  bool IsPotentiallyDelayedGlobalOperator = false;
 
 public:
   OverloadedDeclRefExpr(ArrayRef<ValueDecl*> Decls, DeclNameLoc Loc,
+                        FunctionRefKind functionRefKind,
                         bool Implicit, Type Ty = Type())
-    : OverloadSetRefExpr(ExprKind::OverloadedDeclRef, Decls, Implicit, Ty),
-      Loc(Loc) { }
+      : OverloadSetRefExpr(ExprKind::OverloadedDeclRef, Decls, functionRefKind,
+                           Implicit, Ty),
+        Loc(Loc) {
+  }
   
   DeclNameLoc getNameLoc() const { return Loc; }
   SourceLoc getLoc() const { return Loc.getBaseNameLoc(); }
   SourceRange getSourceRange() const { return Loc.getSourceRange(); }
 
-  void setSpecialized(bool specialized) { IsSpecialized = specialized; }
-
-  /// \brief Determine whether this declaration reference was immediately
-  /// specialized by <...>.
-  bool isSpecialized() const { return IsSpecialized; }
-  
-  void setIsPotentiallyDelayedGlobalOperator() {
-    IsPotentiallyDelayedGlobalOperator = true;
-  }
-  bool isPotentiallyDelayedGlobalOperator() const {
-    return IsPotentiallyDelayedGlobalOperator;
-  }
-
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::OverloadedDeclRef;
-  }
-};
-
-/// OverloadedMemberRefExpr - A reference to an overloaded name that is a
-/// member, relative to some base expression, that will eventually be
-/// resolved to some kind of member-reference expression.
-class OverloadedMemberRefExpr : public OverloadSetRefExpr {
-  Expr *SubExpr;
-  SourceLoc DotLoc;
-  DeclNameLoc MemberLoc;
-  
-public:
-  OverloadedMemberRefExpr(Expr *SubExpr, SourceLoc DotLoc,
-                          ArrayRef<ValueDecl *> Decls, DeclNameLoc MemberLoc,
-                          bool Implicit, Type Ty = Type(),
-                          AccessSemantics semantics = AccessSemantics::Ordinary)
-    : OverloadSetRefExpr(ExprKind::OverloadedMemberRef, Decls, Implicit, Ty),
-      SubExpr(SubExpr), DotLoc(DotLoc), MemberLoc(MemberLoc) {
-    OverloadedMemberRefExprBits.Semantics = unsigned(semantics);
-  }
-
-  SourceLoc getDotLoc() const { return DotLoc; }
-  DeclNameLoc getMemberLoc() const { return MemberLoc; }
-  Expr *getBase() const { return SubExpr; }
-  void setBase(Expr *E) { SubExpr = E; }
-  
-  SourceLoc getLoc() const { return MemberLoc.getBaseNameLoc(); }
-  SourceLoc getStartLoc() const {
-    return DotLoc.isValid()? SubExpr->getStartLoc()
-                           : MemberLoc.getBaseNameLoc();
-  }
-  SourceLoc getEndLoc() const { return MemberLoc.getSourceRange().End; }
-
-  AccessSemantics getAccessSemantics() const {
-    return AccessSemantics(OverloadedMemberRefExprBits.Semantics);
-  }
-
-  static bool classof(const Expr *E) {
-  return E->getKind() == ExprKind::OverloadedMemberRef;
   }
 };
 
@@ -1220,29 +1514,39 @@ public:
 class UnresolvedDeclRefExpr : public Expr {
   DeclName Name;
   DeclNameLoc Loc;
-  DeclRefKind RefKind;
-  bool IsSpecialized = false;
 
 public:
   UnresolvedDeclRefExpr(DeclName name, DeclRefKind refKind, DeclNameLoc loc)
-    : Expr(ExprKind::UnresolvedDeclRef, /*Implicit=*/loc.isInvalid()),
-      Name(name), Loc(loc), RefKind(refKind) {
+      : Expr(ExprKind::UnresolvedDeclRef, /*Implicit=*/loc.isInvalid()),
+        Name(name), Loc(loc) {
+    UnresolvedDeclRefExprBits.DeclRefKind = static_cast<unsigned>(refKind);
+    UnresolvedDeclRefExprBits.FunctionRefKind =
+      static_cast<unsigned>(Loc.isCompound() ? FunctionRefKind::Compound
+                                             : FunctionRefKind::Unapplied);
   }
   
   bool hasName() const { return static_cast<bool>(Name); }
   DeclName getName() const { return Name; }
-  DeclRefKind getRefKind() const { return RefKind; }
 
-  void setSpecialized(bool specialized) { IsSpecialized = specialized; }
+  DeclRefKind getRefKind() const {
+    return static_cast<DeclRefKind>(UnresolvedDeclRefExprBits.DeclRefKind);
+  }
 
-  /// \brief Determine whether this declaration reference was immediately
-  /// specialized by <...>.
-  bool isSpecialized() const { return IsSpecialized; }
+  /// Retrieve the kind of function reference.
+  FunctionRefKind getFunctionRefKind() const {
+    return static_cast<FunctionRefKind>(
+             UnresolvedDeclRefExprBits.FunctionRefKind);
+  }
+
+  /// Set the kind of function reference.
+  void setFunctionRefKind(FunctionRefKind refKind) {
+    UnresolvedDeclRefExprBits.FunctionRefKind = static_cast<unsigned>(refKind);
+  }
 
   DeclNameLoc getNameLoc() const { return Loc; }
 
   SourceRange getSourceRange() const { return Loc.getSourceRange(); }
-  
+
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::UnresolvedDeclRef;
   }
@@ -1308,9 +1612,22 @@ public:
 /// subscript is available.
 class DynamicLookupExpr : public Expr {
 protected:
-  explicit DynamicLookupExpr(ExprKind kind) : Expr(kind, /*Implicit=*/false) { }
+  Expr *Base;
+  ConcreteDeclRef Member;
+
+  explicit DynamicLookupExpr(ExprKind kind, ConcreteDeclRef member, Expr *base)
+    : Expr(kind, /*Implicit=*/false), Base(base), Member(member) { }
 
 public:
+  /// Retrieve the member to which this access refers.
+  ConcreteDeclRef getMember() const { return Member; }
+
+  /// Retrieve the base of the expression.
+  Expr *getBase() const { return Base; }
+
+  /// Replace the base of the expression.
+  void setBase(Expr *base) { Base = base; }
+
   static bool classof(const Expr *E) {
     return E->getKind() >= ExprKind::First_DynamicLookupExpr &&
            E->getKind() <= ExprKind::Last_DynamicLookupExpr;
@@ -1333,8 +1650,6 @@ public:
 /// print(x.foo!(17)) // x.foo has type ((i : Int) -> String)?
 /// \endcode
 class DynamicMemberRefExpr : public DynamicLookupExpr {
-  Expr *Base;
-  ConcreteDeclRef Member;
   SourceLoc DotLoc;
   DeclNameLoc NameLoc;
 
@@ -1342,18 +1657,9 @@ public:
   DynamicMemberRefExpr(Expr *base, SourceLoc dotLoc,
                        ConcreteDeclRef member,
                        DeclNameLoc nameLoc)
-    : DynamicLookupExpr(ExprKind::DynamicMemberRef),
-      Base(base), Member(member), DotLoc(dotLoc), NameLoc(nameLoc) {
+    : DynamicLookupExpr(ExprKind::DynamicMemberRef, member, base),
+      DotLoc(dotLoc), NameLoc(nameLoc) {
     }
-
-  /// Retrieve the base of the expression.
-  Expr *getBase() const { return Base; }
-
-  /// Replace the base of the expression.
-  void setBase(Expr *base) { Base = base; }
-
-  /// Retrieve the member to which this access refers.
-  ConcreteDeclRef getMember() const { return Member; }
 
   /// Retrieve the location of the member name.
   DeclNameLoc getNameLoc() const { return NameLoc; }
@@ -1398,16 +1704,39 @@ public:
 /// var x : AnyObject = <some value>
 /// print(x[27]! // x[27] has type String?
 /// \endcode
-class DynamicSubscriptExpr : public DynamicLookupExpr {
-  Expr *Base;
+class DynamicSubscriptExpr final
+    : public DynamicLookupExpr,
+      public TrailingCallArguments<DynamicSubscriptExpr> {
+  friend TrailingCallArguments;
+
   Expr *Index;
-  ConcreteDeclRef Member;
+
+  DynamicSubscriptExpr(Expr *base, Expr *index, ArrayRef<Identifier> argLabels,
+                       ArrayRef<SourceLoc> argLabelLocs,
+                       bool hasTrailingClosure, ConcreteDeclRef member,
+                       bool implicit);
 
 public:
-  DynamicSubscriptExpr(Expr *base, Expr *index, 
-                       ConcreteDeclRef member)
-    : DynamicLookupExpr(ExprKind::DynamicSubscript),
-      Base(base), Index(index), Member(member) { }
+  /// Create a dynamic subscript.
+  ///
+  /// Note: do not create new callers to this entry point; use the entry point
+  /// that takes separate index arguments.
+  static DynamicSubscriptExpr *
+  create(ASTContext &ctx, Expr *base, Expr *index, ConcreteDeclRef decl,
+         bool implicit,
+         llvm::function_ref<Type(const Expr *)> getType =
+             [](const Expr *E) -> Type { return E->getType(); });
+
+  /// Create a new dynamic subscript.
+  static DynamicSubscriptExpr *create(ASTContext &ctx, Expr *base,
+                                      SourceLoc lSquareLoc,
+                                      ArrayRef<Expr *> indexArgs,
+                                      ArrayRef<Identifier> indexArgLabels,
+                                      ArrayRef<SourceLoc> indexArgLabelLocs,
+                                      SourceLoc rSquareLoc,
+                                      Expr *trailingClosure,
+                                      ConcreteDeclRef decl,
+                                      bool implicit);
 
   /// Retrieve the base of the expression.
   Expr *getBase() const { return Base; }
@@ -1420,8 +1749,18 @@ public:
   Expr *getIndex() const { return Index; }
   void setIndex(Expr *E) { Index = E; }
 
-  /// Retrieve the member to which this access refers.
-  ConcreteDeclRef getMember() const { return Member; }
+  unsigned getNumArguments() const {
+    return DynamicSubscriptExprBits.NumArgLabels;
+  }
+
+  bool hasArgumentLabelLocs() const {
+    return DynamicSubscriptExprBits.HasArgLabelLocs;
+  }
+
+  /// Whether this call with written with a trailing closure.
+  bool hasTrailingClosure() const {
+    return DynamicSubscriptExprBits.HasTrailingClosure;
+  }
 
   SourceLoc getLoc() const { return Index->getStartLoc(); }
 
@@ -1436,24 +1775,61 @@ public:
 /// UnresolvedMemberExpr - This represents '.foo', an unresolved reference to a
 /// member, which is to be resolved with context sensitive type information into
 /// bar.foo.  These always have unresolved type.
-class UnresolvedMemberExpr : public Expr {
+class UnresolvedMemberExpr final
+    : public Expr,
+      public TrailingCallArguments<UnresolvedMemberExpr> {
   SourceLoc DotLoc;
   DeclNameLoc NameLoc;
   DeclName Name;
   Expr *Argument;
 
-public:  
   UnresolvedMemberExpr(SourceLoc dotLoc, DeclNameLoc nameLoc,
-                       DeclName name, Expr *argument)
-    : Expr(ExprKind::UnresolvedMember, /*Implicit=*/false),
-      DotLoc(dotLoc), NameLoc(nameLoc), Name(name), Argument(argument) {
-  }
+                       DeclName name, Expr *argument,
+                       ArrayRef<Identifier> argLabels,
+                       ArrayRef<SourceLoc> argLabelLocs,
+                       bool hasTrailingClosure,
+                       bool implicit);
+
+public:
+  /// Create a new unresolved member expression with no arguments.
+  static UnresolvedMemberExpr *create(ASTContext &ctx, SourceLoc dotLoc,
+                                      DeclNameLoc nameLoc, DeclName name,
+                                      bool implicit);
+
+  /// Create a new unresolved member expression.
+  static UnresolvedMemberExpr *create(ASTContext &ctx, SourceLoc dotLoc,
+                                      DeclNameLoc nameLoc, DeclName name,
+                                      SourceLoc lParenLoc,
+                                      ArrayRef<Expr *> args,
+                                      ArrayRef<Identifier> argLabels,
+                                      ArrayRef<SourceLoc> argLabelLocs,
+                                      SourceLoc rParenLoc,
+                                      Expr *trailingClosure,
+                                      bool implicit);
 
   DeclName getName() const { return Name; }
   DeclNameLoc getNameLoc() const { return NameLoc; }
   SourceLoc getDotLoc() const { return DotLoc; }
   Expr *getArgument() const { return Argument; }
   void setArgument(Expr *argument) { Argument = argument; }
+
+  /// Whether this reference has arguments.
+  bool hasArguments() const {
+    return UnresolvedMemberExprBits.HasArguments;
+  }
+
+  unsigned getNumArguments() const {
+    return UnresolvedMemberExprBits.NumArgLabels;
+  }
+
+  bool hasArgumentLabelLocs() const {
+    return UnresolvedMemberExprBits.HasArgLabelLocs;
+  }
+
+  /// Whether this call with written with a trailing closure.
+  bool hasTrailingClosure() const {
+    return UnresolvedMemberExprBits.HasTrailingClosure;
+  }
 
   SourceLoc getLoc() const { return NameLoc.getBaseNameLoc(); }
 
@@ -1707,8 +2083,7 @@ public:
   SourceLoc getLParenLoc() const { return LParenLoc; }
   SourceLoc getRParenLoc() const { return RParenLoc; }
 
-  SourceLoc getStartLoc() const;
-  SourceLoc getEndLoc() const;
+  SourceRange getSourceRange() const;
 
   /// \brief Whether this expression has a trailing closure as its argument.
   bool hasTrailingClosure() const { return TupleExprBits.HasTrailingClosure; }
@@ -1784,6 +2159,10 @@ class CollectionExpr : public Expr {
 
   Expr *SemanticExpr = nullptr;
 
+  /// True if the type of this collection expr was inferred by the collection
+  /// fallback type, like [Any].
+  bool IsTypeDefaulted = false;
+
 protected:
   CollectionExpr(ExprKind Kind, SourceLoc LBracketLoc,
                  MutableArrayRef<Expr*> Elements,
@@ -1800,6 +2179,9 @@ public:
   Expr *getElement(unsigned i) const { return Elements[i]; }
   void setElement(unsigned i, Expr *E) { Elements[i] = E; }
   unsigned getNumElements() const { return Elements.size(); }
+
+  bool isTypeDefaulted() const { return IsTypeDefaulted; }
+  void setIsTypeDefaulted(bool value = true) { IsTypeDefaulted = value; }
 
   SourceLoc getLBracketLoc() const { return LBracketLoc; }
   SourceLoc getRBracketLoc() const { return RBracketLoc; }
@@ -1870,22 +2252,43 @@ public:
 /// type-checked and well-formed subscript expression refers to a subscript
 /// declaration, which provides a getter and (optionally) a setter that will
 /// be used to perform reads/writes.
-class SubscriptExpr : public Expr {
+class SubscriptExpr final : public Expr,
+                            public TrailingCallArguments<SubscriptExpr> {
+  friend TrailingCallArguments;
+
   ConcreteDeclRef TheDecl;
   Expr *Base;
   Expr *Index;
+
+  SubscriptExpr(Expr *base, Expr *index, ArrayRef<Identifier> argLabels,
+                ArrayRef<SourceLoc> argLabelLocs, bool hasTrailingClosure,
+                ConcreteDeclRef decl, bool implicit, AccessSemantics semantics);
   
 public:
-  SubscriptExpr(Expr *base, Expr *index,
-                ConcreteDeclRef decl = ConcreteDeclRef(),
-                bool implicit = false,
-                AccessSemantics semantics = AccessSemantics::Ordinary)
-    : Expr(ExprKind::Subscript, implicit, Type()),
-      TheDecl(decl), Base(base), Index(index) {
-    SubscriptExprBits.Semantics = (unsigned) semantics;
-    SubscriptExprBits.IsSuper = false;
-  }
-  
+  /// Create a subscript.
+  ///
+  /// Note: do not create new callers to this entry point; use the entry point
+  /// that takes separate index arguments.
+  static SubscriptExpr *
+  create(ASTContext &ctx, Expr *base, Expr *index,
+         ConcreteDeclRef decl = ConcreteDeclRef(), bool implicit = false,
+         AccessSemantics semantics = AccessSemantics::Ordinary,
+         llvm::function_ref<Type(const Expr *)> getType =
+             [](const Expr *E) -> Type { return E->getType(); });
+
+  /// Create a new subscript.
+  static SubscriptExpr *create(ASTContext &ctx, Expr *base,
+                               SourceLoc lSquareLoc,
+                               ArrayRef<Expr *> indexArgs,
+                               ArrayRef<Identifier> indexArgLabels,
+                               ArrayRef<SourceLoc> indexArgLabelLocs,
+                               SourceLoc rSquareLoc,
+                               Expr *trailingClosure,
+                               ConcreteDeclRef decl = ConcreteDeclRef(),
+                               bool implicit = false,
+                               AccessSemantics semantics
+                                 = AccessSemantics::Ordinary);
+
   /// getBase - Retrieve the base of the subscript expression, i.e., the
   /// value being indexed.
   Expr *getBase() const { return Base; }
@@ -1895,6 +2298,19 @@ public:
   /// "offset" into the base value.
   Expr *getIndex() const { return Index; }
   void setIndex(Expr *E) { Index = E; }
+
+  unsigned getNumArguments() const {
+    return SubscriptExprBits.NumArgLabels;
+  }
+
+  bool hasArgumentLabelLocs() const {
+    return SubscriptExprBits.HasArgLabelLocs;
+  }
+
+  /// Whether this call with written with a trailing closure.
+  bool hasTrailingClosure() const {
+    return SubscriptExprBits.HasTrailingClosure;
+  }
 
   /// Determine whether this subscript reference should bypass the
   /// ordinary accessors.
@@ -1930,6 +2346,33 @@ public:
   }
 };
 
+/// Subscripting expression that applies a keypath to a base.
+class KeyPathApplicationExpr : public Expr {
+  Expr *Base;
+  Expr *KeyPath;
+  SourceLoc LBracketLoc, RBracketLoc;
+  
+public:
+  KeyPathApplicationExpr(Expr *base, SourceLoc lBracket, Expr *keyPath,
+                         SourceLoc rBracket, Type ty, bool implicit)
+    : Expr(ExprKind::KeyPathApplication, implicit, ty),
+      Base(base), KeyPath(keyPath), LBracketLoc(lBracket), RBracketLoc(rBracket)
+  {}
+  
+  SourceLoc getLoc() const { return LBracketLoc; }
+  SourceLoc getStartLoc() const { return Base->getStartLoc(); }
+  SourceLoc getEndLoc() const { return RBracketLoc; }
+  
+  Expr *getBase() const { return Base; }
+  void setBase(Expr *E) { Base = E; }
+  Expr *getKeyPath() const { return KeyPath; }
+  void setKeyPath(Expr *E) { KeyPath = E; }
+  
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::KeyPathApplication;
+  }
+};
+
 /// A member access (foo.bar) on an expression with unresolved type.
 class UnresolvedDotExpr : public Expr {
   Expr *SubExpr;
@@ -1939,8 +2382,12 @@ class UnresolvedDotExpr : public Expr {
 public:
   UnresolvedDotExpr(Expr *subexpr, SourceLoc dotloc, DeclName name,
                     DeclNameLoc nameloc, bool Implicit)
-  : Expr(ExprKind::UnresolvedDot, Implicit), SubExpr(subexpr), DotLoc(dotloc),
-    NameLoc(nameloc), Name(name) {}
+    : Expr(ExprKind::UnresolvedDot, Implicit), SubExpr(subexpr), DotLoc(dotloc),
+      NameLoc(nameloc), Name(name) {
+    UnresolvedDotExprBits.FunctionRefKind =
+      static_cast<unsigned>(NameLoc.isCompound() ? FunctionRefKind::Compound
+                                                 : FunctionRefKind::Unapplied);
+  }
   
   SourceLoc getLoc() const { return NameLoc.getBaseNameLoc(); }
 
@@ -1958,6 +2405,16 @@ public:
 
   DeclName getName() const { return Name; }
   DeclNameLoc getNameLoc() const { return NameLoc; }
+
+  /// Retrieve the kind of function reference.
+  FunctionRefKind getFunctionRefKind() const {
+    return static_cast<FunctionRefKind>(UnresolvedDotExprBits.FunctionRefKind);
+  }
+
+  /// Set the kind of function reference.
+  void setFunctionRefKind(FunctionRefKind refKind) {
+    UnresolvedDotExprBits.FunctionRefKind = static_cast<unsigned>(refKind);
+  }
 
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::UnresolvedDot;
@@ -2041,6 +2498,9 @@ public:
   SourceLoc getQuestionLoc() const { return QuestionLoc; }
 
   unsigned getDepth() const { return BindOptionalExprBits.Depth; }
+  void setDepth(unsigned depth) {
+    BindOptionalExprBits.Depth = depth;
+  }
 
   Expr *getSubExpr() const { return SubExpr; }
   void setSubExpr(Expr *expr) { SubExpr = expr; }
@@ -2122,6 +2582,69 @@ public:
   }
 };
 
+/// \brief An expression that grants temporary escapability to a nonescaping
+/// closure value.
+///
+/// This expression is formed by the type checker when a call to the
+/// `withoutActuallyEscaping` declaration is made.
+class MakeTemporarilyEscapableExpr : public Expr {
+  Expr *NonescapingClosureValue;
+  OpaqueValueExpr *EscapingClosureValue;
+  Expr *SubExpr;
+  SourceLoc NameLoc, LParenLoc, RParenLoc;
+
+public:
+  MakeTemporarilyEscapableExpr(SourceLoc NameLoc,
+                               SourceLoc LParenLoc,
+                               Expr *NonescapingClosureValue,
+                               Expr *SubExpr,
+                               SourceLoc RParenLoc,
+                               OpaqueValueExpr *OpaqueValueForEscapingClosure,
+                               bool implicit = false)
+    : Expr(ExprKind::MakeTemporarilyEscapable, implicit, Type()),
+      NonescapingClosureValue(NonescapingClosureValue),
+      EscapingClosureValue(OpaqueValueForEscapingClosure),
+      SubExpr(SubExpr),
+      NameLoc(NameLoc), LParenLoc(LParenLoc), RParenLoc(RParenLoc)
+  {}
+  
+  SourceLoc getStartLoc() const {
+    return NameLoc;
+  }
+  SourceLoc getEndLoc() const {
+    return RParenLoc;
+  }
+  
+  SourceLoc getLoc() const {
+    return NameLoc;
+  }
+  
+  /// Retrieve the opaque value representing the escapable copy of the
+  /// closure.
+  OpaqueValueExpr *getOpaqueValue() const { return EscapingClosureValue; }
+  
+  /// Retrieve the nonescaping closure expression.
+  Expr *getNonescapingClosureValue() const {
+    return NonescapingClosureValue;
+  }
+  void setNonescapingClosureValue(Expr *e) {
+    NonescapingClosureValue = e;
+  }
+  
+  /// Retrieve the subexpression that has access to the escapable copy of the
+  /// closure.
+  Expr *getSubExpr() const {
+    return SubExpr;
+  }
+  void setSubExpr(Expr *e) {
+    SubExpr = e;
+  }
+
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::MakeTemporarilyEscapable;
+  }
+};
+
 /// \brief An expression that opens up a value of protocol or protocol
 /// composition type and gives a name to its dynamic type.
 ///
@@ -2137,8 +2660,9 @@ class OpenExistentialExpr : public Expr {
 public:
   OpenExistentialExpr(Expr *existentialValue,
                       OpaqueValueExpr *opaqueValue,
-                      Expr *subExpr)
-    : Expr(ExprKind::OpenExistential, /*Implicit=*/ true, subExpr->getType()),
+                      Expr *subExpr,
+                      Type subExprTy)
+    : Expr(ExprKind::OpenExistential, /*Implicit=*/ true, subExprTy),
       ExistentialValue(existentialValue), OpaqueValue(opaqueValue), 
       SubExpr(subExpr) { }
 
@@ -2239,32 +2763,23 @@ public:
   }
 };
   
-/// Convert the address of an lvalue to a raw pointer.
-class LValueToPointerExpr : public ImplicitConversionExpr {
-  Type AbstractionPattern;
-public:
-  LValueToPointerExpr(Expr *subExpr, Type ty, Type abstractionTy)
-    : ImplicitConversionExpr(ExprKind::LValueToPointer, subExpr, ty),
-      AbstractionPattern(abstractionTy) {}
-  
-  /// Get the declared type of the type for which we are performing this
-  /// conversion. This defines the abstraction level at which the lvalue should
-  /// be emitted before taking its address.
-  Type getAbstractionPatternType() const {
-    return AbstractionPattern;
-  }
-  
-  static bool classof(const Expr *E) {
-    return E->getKind() == ExprKind::LValueToPointer;
-  }
-};
-  
 /// Convert the address of an inout property to a pointer.
 class InOutToPointerExpr : public ImplicitConversionExpr {
 public:
   InOutToPointerExpr(Expr *subExpr, Type ty)
-    : ImplicitConversionExpr(ExprKind::InOutToPointer, subExpr, ty) {}
-  
+      : ImplicitConversionExpr(ExprKind::InOutToPointer, subExpr, ty) {
+    InOutToPointerExprBits.IsNonAccessing = false;
+  }
+
+  /// Is this conversion "non-accessing"?  That is, is it only using the
+  /// pointer for its identity, as opposed to actually accessing the memory?
+  bool isNonAccessing() const {
+    return InOutToPointerExprBits.IsNonAccessing;
+  }
+  void setNonAccessing(bool nonAccessing = true) {
+    InOutToPointerExprBits.IsNonAccessing = nonAccessing;
+  }
+
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::InOutToPointer;
   }
@@ -2274,8 +2789,19 @@ public:
 class ArrayToPointerExpr : public ImplicitConversionExpr {
 public:
   ArrayToPointerExpr(Expr *subExpr, Type ty)
-    : ImplicitConversionExpr(ExprKind::ArrayToPointer, subExpr, ty) {}
+      : ImplicitConversionExpr(ExprKind::ArrayToPointer, subExpr, ty) {
+    ArrayToPointerExprBits.IsNonAccessing = false;
+  }
   
+  /// Is this conversion "non-accessing"?  That is, is it only using the
+  /// pointer for its identity, as opposed to actually accessing the memory?
+  bool isNonAccessing() const {
+    return ArrayToPointerExprBits.IsNonAccessing;
+  }
+  void setNonAccessing(bool nonAccessing = true) {
+    ArrayToPointerExprBits.IsNonAccessing = nonAccessing;
+  }
+
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::ArrayToPointer;
   }
@@ -2326,7 +2852,7 @@ public:
 };
 
 /// TupleShuffleExpr - This represents a permutation of a tuple value to a new
-/// tuple type.  The expression's type is known to be a tuple type.
+/// tuple type.
 ///
 /// If hasScalarSource() is true, the subexpression should be treated
 /// as if it were implicitly injected into a single-element tuple
@@ -2347,9 +2873,22 @@ public:
     CallerDefaultInitialize = -3
   };
 
-  enum SourceIsScalar_t : bool {
-    SourceIsTuple = false,
-    SourceIsScalar = true
+  enum TypeImpact {
+    /// The source value is a tuple which is destructured and modified to
+    /// create the result, which is a tuple.
+    TupleToTuple,
+
+    /// The source value is a tuple which is destructured and modified to
+    /// create the result, which is a scalar because it has one element and
+    /// no labels.
+    TupleToScalar,
+
+    /// The source value is an individual value (possibly one with tuple
+    /// type) which is inserted into a particular position in the result,
+    /// which is a tuple.
+    ScalarToTuple
+
+    // (TupleShuffleExprs are never created for a scalar-to-scalar conversion.)
   };
 
 private:
@@ -2373,29 +2912,35 @@ private:
 
 public:
   TupleShuffleExpr(Expr *subExpr, ArrayRef<int> elementMapping, 
-                   SourceIsScalar_t isSourceScalar,
+                   TypeImpact typeImpact,
                    ConcreteDeclRef defaultArgsOwner,
                    ArrayRef<unsigned> VariadicArgs,
-                   MutableArrayRef<Expr *> CallerDefaultArgs, Type ty)
+                   Type VarargsArrayTy,
+                   MutableArrayRef<Expr *> CallerDefaultArgs,
+                   Type ty)
     : ImplicitConversionExpr(ExprKind::TupleShuffle, subExpr, ty),
-      ElementMapping(elementMapping), VarargsArrayTy(),
+      ElementMapping(elementMapping), VarargsArrayTy(VarargsArrayTy),
       DefaultArgsOwner(defaultArgsOwner), VariadicArgs(VariadicArgs),
       CallerDefaultArgs(CallerDefaultArgs)
   {
-    TupleShuffleExprBits.IsSourceScalar = isSourceScalar;
+    TupleShuffleExprBits.TypeImpact = typeImpact;
   }
 
   ArrayRef<int> getElementMapping() const { return ElementMapping; }
 
-  /// Is the source expression scalar?
-  ///
-  /// This doesn't necessarily mean it's not a tuple; it just means
-  /// that it should be treated as if it were an element of a
-  /// single-element tuple for the purposes of interpreting behavior.
-  bool isSourceScalar() const { return TupleShuffleExprBits.IsSourceScalar; }
+  /// What is the type impact of this shuffle?
+  TypeImpact getTypeImpact() const {
+    return TypeImpact(TupleShuffleExprBits.TypeImpact);
+  }
 
-  /// Set the varargs array type to use.
-  void setVarargsArrayType(Type T) { VarargsArrayTy = T; }
+  bool isSourceScalar() const {
+    return getTypeImpact() == ScalarToTuple;
+  }
+
+  bool isResultScalar() const {
+    return getTypeImpact() == TupleToScalar;
+  }
+
   Type getVarargsArrayType() const {
     assert(!VarargsArrayTy.isNull());
     return VarargsArrayTy;
@@ -2513,16 +3058,44 @@ public:
 /// elements have type U, where U is a subtype of T.
 class CollectionUpcastConversionExpr : public ImplicitConversionExpr {
 public:
+  struct ConversionPair {
+    OpaqueValueExpr *OrigValue;
+    Expr *Conversion;
+
+    explicit operator bool() const { return OrigValue != nullptr; }
+  };
+private:
+  ConversionPair KeyConversion;
+  ConversionPair ValueConversion;
+public:
   CollectionUpcastConversionExpr(Expr *subExpr, Type type,
-                                 bool bridgesToObjC)
+                                 ConversionPair keyConversion,
+                                 ConversionPair valueConversion)
     : ImplicitConversionExpr(
-        ExprKind::CollectionUpcastConversion, subExpr, type) {
-    CollectionUpcastConversionExprBits.BridgesToObjC = bridgesToObjC;
+        ExprKind::CollectionUpcastConversion, subExpr, type),
+      KeyConversion(keyConversion), ValueConversion(valueConversion) {
+    assert((!KeyConversion || ValueConversion)
+           && "key conversion without value conversion");
   }
 
-  /// Whether this upcast bridges the source elements to Objective-C.
-  bool bridgesToObjC() const {
-    return CollectionUpcastConversionExprBits.BridgesToObjC;
+  /// Returns the expression that should be used to perform a
+  /// conversion of the collection's values; null if the conversion
+  /// is formally trivial because the key type does not change.
+  const ConversionPair &getKeyConversion() const {
+    return KeyConversion;
+  }
+  void setKeyConversion(const ConversionPair &pair) {
+    KeyConversion = pair;
+  }
+
+  /// Returns the expression that should be used to perform a
+  /// conversion of the collection's values; null if the conversion
+  /// is formally trivial because the value type does not change.
+  const ConversionPair &getValueConversion() const {
+    return ValueConversion;
+  }
+  void setValueConversion(const ConversionPair &pair) {
+    ValueConversion = pair;
   }
 
   static bool classof(const Expr *E) {
@@ -2572,9 +3145,78 @@ public:
   ArrayRef<ProtocolConformanceRef> getConformances() const {
     return Conformances;
   }
-  
+
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::Erasure;
+  }
+};
+
+/// AnyHashableErasureExpr - Perform type erasure by converting a value
+/// to AnyHashable type.
+///
+/// The type of the sub-expression should always be a type that implements
+/// the Hashable protocol.
+class AnyHashableErasureExpr : public ImplicitConversionExpr {
+  ProtocolConformanceRef Conformance;
+
+public:
+  AnyHashableErasureExpr(Expr *subExpr, Type type,
+                         ProtocolConformanceRef conformance)
+    : ImplicitConversionExpr(ExprKind::AnyHashableErasure, subExpr, type),
+      Conformance(conformance) {}
+
+  /// \brief Retrieve the mapping specifying how the type of the
+  /// subexpression conforms to the Hashable protocol.
+  ProtocolConformanceRef getConformance() const {
+    return Conformance;
+  }
+  
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::AnyHashableErasure;
+  }
+};
+
+/// ConditionalBridgeFromObjCExpr - Bridge a value from a non-native
+/// representation.
+class ConditionalBridgeFromObjCExpr : public ImplicitConversionExpr {
+  ConcreteDeclRef Conversion;
+
+public:
+  ConditionalBridgeFromObjCExpr(Expr *subExpr, Type type,
+                                ConcreteDeclRef conversion)
+    : ImplicitConversionExpr(ExprKind::ConditionalBridgeFromObjC, subExpr, type),
+      Conversion(conversion) {
+  }
+
+  /// \brief Retrieve the conversion function.
+  ConcreteDeclRef getConversion() const {
+    return Conversion;
+  }
+
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::ConditionalBridgeFromObjC;
+  }
+};
+
+/// BridgeFromObjCExpr - Bridge a value from a non-native representation.
+class BridgeFromObjCExpr : public ImplicitConversionExpr {
+public:
+  BridgeFromObjCExpr(Expr *subExpr, Type type)
+    : ImplicitConversionExpr(ExprKind::BridgeFromObjC, subExpr, type) {}
+
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::BridgeFromObjC;
+  }
+};
+
+/// BridgeToObjCExpr - Bridge a value to a non-native representation.
+class BridgeToObjCExpr : public ImplicitConversionExpr {
+public:
+  BridgeToObjCExpr(Expr *subExpr, Type type)
+    : ImplicitConversionExpr(ExprKind::BridgeToObjC, subExpr, type) {}
+
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::BridgeToObjC;
   }
 };
 
@@ -2646,10 +3288,8 @@ class InOutExpr : public Expr {
   SourceLoc OperLoc;
 
 public:
-  InOutExpr(SourceLoc operLoc, Expr *subExpr, Type type,
-                bool isImplicit = false)
-    : Expr(ExprKind::InOut, isImplicit, type),
-      SubExpr(subExpr), OperLoc(operLoc) {}
+  InOutExpr(SourceLoc operLoc, Expr *subExpr, Type baseType,
+            bool isImplicit = false);
 
   SourceLoc getStartLoc() const { return OperLoc; }
   SourceLoc getEndLoc() const { return SubExpr->getEndLoc(); }
@@ -2711,48 +3351,6 @@ public:
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::Sequence;
-  }
-};
-
-
-/// Instances of this structure represent elements of the capture list that can
-/// optionally occur in a capture expression.
-struct CaptureListEntry {
-  VarDecl *Var;
-  PatternBindingDecl *Init;
-
-  CaptureListEntry(VarDecl *Var, PatternBindingDecl *Init)
-  : Var(Var), Init(Init) {
-  }
-};
-
-/// CaptureListExpr - This expression represents the capture list on an explicit
-/// closure.  Because the capture list is evaluated outside of the closure, this
-/// CaptureList wraps the ClosureExpr.  The dynamic semantics are that evaluates
-/// the variable bindings from the capture list, then evaluates the
-/// subexpression (the closure itself) and returns the result.
-class CaptureListExpr : public Expr {
-  ArrayRef<CaptureListEntry> captureList;
-  Expr *closureBody;
-public:
-  CaptureListExpr(ArrayRef<CaptureListEntry> captureList, Expr *closureBody)
-    : Expr(ExprKind::CaptureList, /*Implicit=*/false, Type()),
-      captureList(captureList), closureBody(closureBody) {
-  }
-
-  ArrayRef<CaptureListEntry> getCaptureList() { return captureList; }
-  Expr *getClosureBody() { return closureBody; }
-  const Expr *getClosureBody() const { return closureBody; }
-
-  void setClosureBody(Expr *body) { closureBody = body; }
-
-  /// This is a bit weird, but the capture list is lexically contained within
-  /// the closure, so the ClosureExpr has the full source range.
-  SWIFT_FORWARD_SOURCE_LOCS_TO(closureBody)
-
-  // Implement isa/cast/dyncast/etc.
-  static bool classof(const Expr *E) {
-    return E->getKind() == ExprKind::CaptureList;
   }
 };
 
@@ -2820,10 +3418,11 @@ public:
     return parameterList ? parameterList : ArrayRef<const ParameterList *>();
   }
 
-  unsigned getNaturalArgumentCount() const { return 1; }
-
   /// \brief Retrieve the result type of this closure.
-  Type getResultType() const;
+  Type getResultType(llvm::function_ref<Type(const Expr *)> getType =
+                         [](const Expr *E) -> Type {
+    return E->getType();
+  }) const;
 
   /// \brief Return whether this closure is throwing when fully applied.
   bool isBodyThrowing() const;
@@ -2919,7 +3518,6 @@ public:
       Body(nullptr) {
     setParameterList(params);
     ClosureExprBits.HasAnonymousClosureVars = false;
-    ClosureExprBits.IsVoidConversionClosure = false;
   }
 
   SourceRange getSourceRange() const;
@@ -2945,18 +3543,6 @@ public:
     ClosureExprBits.HasAnonymousClosureVars = true;
   }
   
-  /// \brief Determine if this closure was created to satisfy a contextual
-  /// conversion to a void function type.
-  bool isVoidConversionClosure() const {
-    return ClosureExprBits.IsVoidConversionClosure;
-  }
-  
-  /// \brief Indicate that this closure was created to satisfy a contextual
-  /// conversion to a void function type.
-  void setIsVoidConversionClosure() {
-    ClosureExprBits.IsVoidConversionClosure = true;
-  }
-
   /// \brief Determine whether this closure expression has an
   /// explicitly-specified result type.
   bool hasExplicitResultType() const { return ArrowLoc.isValid(); }
@@ -3081,30 +3667,78 @@ public:
   }
 };
 
-/// DynamicTypeExpr - "base.dynamicType" - Produces a metatype value.
+/// Instances of this structure represent elements of the capture list that can
+/// optionally occur in a capture expression.
+struct CaptureListEntry {
+  VarDecl *Var;
+  PatternBindingDecl *Init;
+
+  CaptureListEntry(VarDecl *Var, PatternBindingDecl *Init)
+  : Var(Var), Init(Init) {
+  }
+};
+
+/// CaptureListExpr - This expression represents the capture list on an explicit
+/// closure.  Because the capture list is evaluated outside of the closure, this
+/// CaptureList wraps the ClosureExpr.  The dynamic semantics are that evaluates
+/// the variable bindings from the capture list, then evaluates the
+/// subexpression (the closure itself) and returns the result.
+class CaptureListExpr : public Expr {
+  ArrayRef<CaptureListEntry> captureList;
+  ClosureExpr *closureBody;
+public:
+  CaptureListExpr(ArrayRef<CaptureListEntry> captureList,
+                  ClosureExpr *closureBody)
+    : Expr(ExprKind::CaptureList, /*Implicit=*/false, Type()),
+      captureList(captureList), closureBody(closureBody) {
+  }
+
+  ArrayRef<CaptureListEntry> getCaptureList() { return captureList; }
+  ClosureExpr *getClosureBody() { return closureBody; }
+  const ClosureExpr *getClosureBody() const { return closureBody; }
+
+  void setClosureBody(ClosureExpr *body) { closureBody = body; }
+
+  /// This is a bit weird, but the capture list is lexically contained within
+  /// the closure, so the ClosureExpr has the full source range.
+  SWIFT_FORWARD_SOURCE_LOCS_TO(closureBody)
+
+  // Implement isa/cast/dyncast/etc.
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::CaptureList;
+  }
+};
+
+/// DynamicTypeExpr - "type(of: base)" - Produces a metatype value.
 ///
-/// The metatype value can comes from evaluating an expression and then
-/// getting its metatype.
+/// The metatype value comes from evaluating an expression then retrieving the
+/// metatype of the result.
 class DynamicTypeExpr : public Expr {
+  SourceLoc KeywordLoc;
+  SourceLoc LParenLoc;
   Expr *Base;
-  SourceLoc MetatypeLoc;
+  SourceLoc RParenLoc;
 
 public:
-  explicit DynamicTypeExpr(Expr *Base, SourceLoc MetatypeLoc, Type Ty)
+  explicit DynamicTypeExpr(SourceLoc KeywordLoc, SourceLoc LParenLoc,
+                           Expr *Base, SourceLoc RParenLoc, Type Ty)
     : Expr(ExprKind::DynamicType, /*Implicit=*/false, Ty),
-      Base(Base), MetatypeLoc(MetatypeLoc) { }
+      KeywordLoc(KeywordLoc), LParenLoc(LParenLoc), Base(Base),
+      RParenLoc(RParenLoc) { }
 
   Expr *getBase() const { return Base; }
   void setBase(Expr *base) { Base = base; }
 
-  SourceLoc getLoc() const { return MetatypeLoc; }
-  SourceLoc getMetatypeLoc() const { return MetatypeLoc; }
-
+  SourceLoc getLoc() const { return KeywordLoc; }
+  SourceRange getSourceRange() const {
+    return SourceRange(KeywordLoc, RParenLoc);
+  }
+  
   SourceLoc getStartLoc() const {
-    return getBase()->getStartLoc();
+    return KeywordLoc;
   }
   SourceLoc getEndLoc() const {
-    return (MetatypeLoc.isValid() ? MetatypeLoc : getBase()->getEndLoc());
+    return RParenLoc;
   }
 
   static bool classof(const Expr *E) {
@@ -3152,7 +3786,8 @@ protected:
 public:
   Expr *getFn() const { return Fn; }
   void setFn(Expr *e) { Fn = e; }
-
+  Expr *getSemanticFn() const { return Fn->getSemanticsProvidingExpr(); }
+  
   Expr *getArg() const { return ArgAndIsSuper.getPointer(); }
   void setArg(Expr *e) {
     assert((getKind() != ExprKind::Binary || isa<TupleExpr>(e)) &&
@@ -3187,6 +3822,16 @@ public:
 
   ValueDecl *getCalledValue() const;
 
+  /// Retrieve the argument labels provided at the call site.
+  ///
+  /// \param scratch Scratch space that will be used when the argument labels
+  /// aren't already stored in the AST context.
+  ArrayRef<Identifier>
+  getArgumentLabels(SmallVectorImpl<Identifier> &scratch) const;
+
+  /// Whether this application was written using a trailing closure.
+  bool hasTrailingClosure() const;
+
   static bool classof(const Expr *E) {
     return E->getKind() >= ExprKind::First_ApplyExpr &&
            E->getKind() <= ExprKind::Last_ApplyExpr;
@@ -3196,10 +3841,58 @@ public:
 /// CallExpr - Application of an argument to a function, which occurs
 /// syntactically through juxtaposition with a TupleExpr whose
 /// leading '(' is unspaced.
-class CallExpr : public ApplyExpr {
+class CallExpr final : public ApplyExpr,
+                       public TrailingCallArguments<CallExpr> {
+  friend TrailingCallArguments;
+
+  CallExpr(Expr *fn, Expr *arg, bool Implicit,
+           ArrayRef<Identifier> argLabels,
+           ArrayRef<SourceLoc> argLabelLocs,
+           bool hasTrailingClosure,
+           Type ty);
+
 public:
-  CallExpr(Expr *fn, Expr *arg, bool Implicit, Type ty = Type())
-    : ApplyExpr(ExprKind::Call, fn, arg, Implicit, ty) {}
+  /// Create a new call expression.
+  ///
+  /// Note: prefer to use the entry points that separate out the arguments.
+  static CallExpr *
+  create(ASTContext &ctx, Expr *fn, Expr *arg, ArrayRef<Identifier> argLabels,
+         ArrayRef<SourceLoc> argLabelLocs, bool hasTrailingClosure,
+         bool implicit, Type type = Type(),
+         llvm::function_ref<Type(const Expr *)> getType =
+             [](const Expr *E) -> Type { return E->getType(); });
+
+  /// Create a new implicit call expression without any source-location
+  /// information.
+  ///
+  /// \param fn The function being called
+  /// \param args The call arguments, not including a trailing closure (if any).
+  /// \param argLabels The argument labels, whose size must equal args.size(),
+  /// or which must be empty.
+  static CallExpr *
+  createImplicit(ASTContext &ctx, Expr *fn, ArrayRef<Expr *> args,
+                 ArrayRef<Identifier> argLabels,
+                 llvm::function_ref<Type(const Expr *)> getType =
+                     [](const Expr *E) -> Type { return E->getType(); }) {
+    return create(ctx, fn, SourceLoc(), args, argLabels, { }, SourceLoc(),
+                  /*trailingClosure=*/nullptr, /*implicit=*/true, getType);
+  }
+
+  /// Create a new call expression.
+  ///
+  /// \param fn The function being called
+  /// \param args The call arguments, not including a trailing closure (if any).
+  /// \param argLabels The argument labels, whose size must equal args.size(),
+  /// or which must be empty.
+  /// \param argLabelLocs The locations of the argument labels, whose size must
+  /// equal args.size() or which must be empty.
+  /// \param trailingClosure The trailing closure, if any.
+  static CallExpr *
+  create(ASTContext &ctx, Expr *fn, SourceLoc lParenLoc, ArrayRef<Expr *> args,
+         ArrayRef<Identifier> argLabels, ArrayRef<SourceLoc> argLabelLocs,
+         SourceLoc rParenLoc, Expr *trailingClosure, bool implicit,
+         llvm::function_ref<Type(const Expr *)> getType =
+             [](const Expr *E) -> Type { return E->getType(); });
 
   SourceLoc getStartLoc() const {
     SourceLoc fnLoc = getFn()->getStartLoc();
@@ -3215,7 +3908,15 @@ public:
     return FnLoc.isValid() ? FnLoc : getArg()->getLoc();
   }
 
-  /// Retrieve the expression that direct represents the callee.
+  unsigned getNumArguments() const { return CallExprBits.NumArgLabels; }
+  bool hasArgumentLabelLocs() const { return CallExprBits.HasArgLabelLocs; }
+
+  /// Whether this call with written with a trailing closure.
+  bool hasTrailingClosure() const { return CallExprBits.HasTrailingClosure; }
+
+  using TrailingCallArguments::getArgumentLabels;
+
+  /// Retrieve the expression that directly represents the callee.
   ///
   /// The "direct" callee is the expression representing the callee
   /// after looking through top-level constructs that don't affect the
@@ -3362,8 +4063,8 @@ class DotSyntaxBaseIgnoredExpr : public Expr {
   SourceLoc DotLoc;
   Expr *RHS;
 public:
-  DotSyntaxBaseIgnoredExpr(Expr *LHS, SourceLoc DotLoc, Expr *RHS)
-    : Expr(ExprKind::DotSyntaxBaseIgnored, /*Implicit=*/false, RHS->getType()),
+  DotSyntaxBaseIgnoredExpr(Expr *LHS, SourceLoc DotLoc, Expr *RHS, Type rhsTy)
+    : Expr(ExprKind::DotSyntaxBaseIgnored, /*Implicit=*/false, rhsTy),
       LHS(LHS), DotLoc(DotLoc), RHS(RHS) {
   }
   
@@ -3414,6 +4115,10 @@ public:
       return AsLoc;
 
     return SubExpr->getLoc();
+  }
+
+  SourceLoc getAsLoc() const {
+    return AsLoc;
   }
 
   SourceRange getSourceRange() const {
@@ -3731,14 +4436,22 @@ public:
   
   SourceLoc getEqualLoc() const { return EqualLoc; }
   
-  SourceLoc getLoc() const { return EqualLoc; }
+  SourceLoc getLoc() const {
+    SourceLoc loc = EqualLoc;
+    if (loc.isValid()) {
+      return loc;
+    }
+    return getStartLoc();
+  }
   SourceLoc getStartLoc() const {
     if (!isFolded()) return EqualLoc;
-    return (Dest->isImplicit() ? Src->getStartLoc() : Dest->getStartLoc());
+    return ( Dest->getStartLoc().isValid()
+           ? Dest->getStartLoc()
+           : Src->getStartLoc());
   }
   SourceLoc getEndLoc() const {
     if (!isFolded()) return EqualLoc;
-    return Src->getEndLoc();
+    return (Src->getEndLoc().isValid() ? Src->getEndLoc() : Dest->getEndLoc());
   }
   
   /// True if the node has been processed by binary expression folding.
@@ -3749,29 +4462,6 @@ public:
   }
 };
 
-/// \brief An expression that describes the use of a default value, which may
-/// come from the default argument of a function type or member initializer.
-///
-/// This expression is synthesized by type checking and cannot be written
-/// directly by the user.
-class DefaultValueExpr : public Expr {
-  Expr *subExpr;
-
-public:
-  explicit DefaultValueExpr(Expr *subExpr)
-    : Expr(ExprKind::DefaultValue, /*Implicit=*/true, subExpr->getType()),
-      subExpr(subExpr) { }
-
-  Expr *getSubExpr() const { return subExpr; }
-  void setSubExpr(Expr *sub) { subExpr = sub; }
-  
-  SourceRange getSourceRange() const { return SourceRange(); }
-
-  static bool classof(const Expr *E) {
-    return E->getKind() == ExprKind::DefaultValue;
-  }
-};
-  
 /// \brief A pattern production that has been parsed but hasn't been resolved
 /// into a complete pattern. Name binding converts these into standalone pattern
 /// nodes or raises an error if a pattern production appears in an invalid
@@ -3877,6 +4567,8 @@ public:
     case ObjCSelectorKind::Setter:
       return true;
     }
+
+    llvm_unreachable("Unhandled ObjcSelectorKind in switch.");
   }
 
   /// Whether this selector references a method.
@@ -3934,105 +4626,382 @@ public:
 /// \code
 /// #keyPath(Person.friends.firstName)
 /// \endcode
-class ObjCKeyPathExpr : public Expr {
-  SourceLoc KeywordLoc;
+class KeyPathExpr : public Expr {
+  SourceLoc StartLoc;
   SourceLoc LParenLoc;
-  SourceLoc RParenLoc;
-  Expr *SemanticExpr = nullptr;
+  SourceLoc EndLoc;
+  Expr *ObjCStringLiteralExpr = nullptr;
 
-  /// A single stored component, which will be either an identifier or
-  /// a resolved declaration.
-  typedef llvm::PointerUnion<Identifier, ValueDecl *> StoredComponent;
+  // The parsed root of a Swift keypath (the section before an unusual dot, like
+  // Foo.Bar in \Foo.Bar.?.baz).
+  Expr *ParsedRoot = nullptr;
+  // The parsed path of a Swift keypath (the section after an unusual dot, like
+  // ?.baz in \Foo.Bar.?.baz).
+  Expr *ParsedPath = nullptr;
 
-  ObjCKeyPathExpr(SourceLoc keywordLoc, SourceLoc lParenLoc,
-              ArrayRef<Identifier> names,
-              ArrayRef<SourceLoc> nameLocs,
-              SourceLoc rParenLoc);
+  // The processed/resolved type, like Foo.Bar in \Foo.Bar.?.baz.
+  TypeRepr *RootType = nullptr;
 
-  /// Retrieve a mutable version of the "components" array, for
-  /// initialization purposes.
-  MutableArrayRef<StoredComponent> getComponentsMutable() {
-    return { reinterpret_cast<StoredComponent *>(this + 1), getNumComponents() };
-  }
+public:
+  /// A single stored component, which will be one of:
+  /// - an unresolved DeclName, which has to be type-checked
+  /// - a resolved ValueDecl, referring to
+  /// - a subscript index expression, which may or may not be resolved
+  /// - an optional chaining, forcing, or wrapping component
+  class Component {
+  public:
+    enum class Kind: unsigned {
+      Invalid,
+      UnresolvedProperty,
+      UnresolvedSubscript,
+      Property,
+      Subscript,
+      OptionalForce,
+      OptionalChain,
+      OptionalWrap
+    };
+  
+  private:
+    union DeclNameOrRef {
+      DeclName UnresolvedName;
+      ConcreteDeclRef ResolvedDecl;
+      
+      DeclNameOrRef() : UnresolvedName{} {}
+      DeclNameOrRef(DeclName un) : UnresolvedName(un) {}
+      DeclNameOrRef(ConcreteDeclRef rd) : ResolvedDecl(rd) {}
+    } Decl;
+    
+    
+    llvm::PointerIntPair<Expr *, 3, Kind> SubscriptIndexExprAndKind;
+    ArrayRef<Identifier> SubscriptLabels;
+    Type ComponentType;
+    SourceLoc Loc;
+    
+    explicit Component(ASTContext *ctxForCopyingLabels,
+                       DeclNameOrRef decl,
+                       Expr *indexExpr,
+                       ArrayRef<Identifier> subscriptLabels,
+                       Kind kind,
+                       Type type,
+                       SourceLoc loc);
+    
+  public:
+    Component()
+      : Component(nullptr, {}, nullptr, {}, Kind::Invalid, Type(), SourceLoc())
+    {}
+    
+    /// Create an unresolved component for a property.
+    static Component forUnresolvedProperty(DeclName UnresolvedName,
+                                           SourceLoc Loc) {
+      return Component(nullptr,
+                       UnresolvedName, nullptr, {},
+                       Kind::UnresolvedProperty,
+                       Type(),
+                       Loc);
+    }
+    
+    /// Create an unresolved component for a subscript.
+    static Component forUnresolvedSubscript(ASTContext &ctx,
+                                     SourceLoc lSquareLoc,
+                                     ArrayRef<Expr *> indexArgs,
+                                     ArrayRef<Identifier> indexArgLabels,
+                                     ArrayRef<SourceLoc> indexArgLabelLocs,
+                                     SourceLoc rSquareLoc,
+                                     Expr *trailingClosure);
+    
+    /// Create an unresolved component for a subscript.
+    ///
+    /// You shouldn't add new uses of this overload; use the one that takes a
+    /// list of index arguments.
+    static Component forUnresolvedSubscriptWithPrebuiltIndexExpr(
+                                         ASTContext &context,
+                                         Expr *index,
+                                         ArrayRef<Identifier> subscriptLabels,
+                                         SourceLoc loc) {
+      
+      return Component(&context,
+                       {}, index, subscriptLabels, Kind::UnresolvedSubscript,
+                       Type(), loc);
+    }
+    
+    /// Create an unresolved optional force `!` component.
+    static Component forUnresolvedOptionalForce(SourceLoc BangLoc) {
+      return Component(nullptr, {}, nullptr, {},
+                       Kind::OptionalForce,
+                       Type(),
+                       BangLoc);
+    }
+    
+    /// Create an unresolved optional chain `?` component.
+    static Component forUnresolvedOptionalChain(SourceLoc QuestionLoc) {
+      return Component(nullptr, {}, nullptr, {},
+                       Kind::OptionalChain,
+                       Type(),
+                       QuestionLoc);
+    }
+    
+    /// Create a component for a property.
+    static Component forProperty(ConcreteDeclRef property,
+                                 Type propertyType,
+                                 SourceLoc loc) {
+      return Component(nullptr, property, nullptr, {},
+                       Kind::Property,
+                       propertyType,
+                       loc);
+    }
+    
+    /// Create a component for a subscript.
+    static Component forSubscript(ASTContext &ctx,
+                                  ConcreteDeclRef subscript,
+                                  SourceLoc lSquareLoc,
+                                  ArrayRef<Expr *> indexArgs,
+                                  ArrayRef<Identifier> indexArgLabels,
+                                  ArrayRef<SourceLoc> indexArgLabelLocs,
+                                  SourceLoc rSquareLoc,
+                                  Expr *trailingClosure,
+                                  Type elementType);
 
-  /// Retrieve the "components" storage.
-  ArrayRef<StoredComponent> getComponents() const {
-    return { reinterpret_cast<StoredComponent const *>(this + 1),
-             getNumComponents() };
-  }
+    /// Create a component for a subscript.
+    ///
+    /// You shouldn't add new uses of this overload; use the one that takes a
+    /// list of index arguments.
+    static Component forSubscriptWithPrebuiltIndexExpr(
+       ConcreteDeclRef subscript, Expr *index, ArrayRef<Identifier> labels,
+       Type elementType, SourceLoc loc);
+    
+    /// Create an optional-forcing `!` component.
+    static Component forOptionalForce(Type forcedType, SourceLoc bangLoc) {
+      return Component(nullptr, {}, nullptr, {},
+                       Kind::OptionalForce, forcedType,
+                       bangLoc);
+    }
+    
+    /// Create an optional-chaining `?` component.
+    static Component forOptionalChain(Type unwrappedType,
+                                      SourceLoc questionLoc) {
+      return Component(nullptr, {}, nullptr, {},
+                       Kind::OptionalChain, unwrappedType,
+                       questionLoc);
+    }
+    
+    /// Create an optional-wrapping component. This doesn't have a surface
+    /// syntax but may appear when the non-optional result of an optional chain
+    /// is implicitly wrapped.
+    static Component forOptionalWrap(Type wrappedType) {
+      return Component(nullptr, {}, nullptr, {},
+                       Kind::OptionalWrap, wrappedType,
+                       SourceLoc());
+    }
+    
+    SourceLoc getLoc() const {
+      return Loc;
+    }
+    
+    Kind getKind() const {
+      return SubscriptIndexExprAndKind.getInt();
+    }
+    
+    bool isValid() const {
+      return getKind() != Kind::Invalid;
+    }
+    
+    bool isResolved() const {
+      if (!getComponentType())
+        return false;
+      
+      switch (getKind()) {
+      case Kind::Subscript:
+      case Kind::OptionalChain:
+      case Kind::OptionalWrap:
+      case Kind::OptionalForce:
+      case Kind::Property:
+        return true;
+      
+      case Kind::UnresolvedSubscript:
+      case Kind::UnresolvedProperty:
+      case Kind::Invalid:
+        return false;
+      }
+    }
+    
+    Expr *getIndexExpr() const {
+      switch (getKind()) {
+      case Kind::Subscript:
+      case Kind::UnresolvedSubscript:
+        return SubscriptIndexExprAndKind.getPointer();
+        
+      case Kind::Invalid:
+      case Kind::OptionalChain:
+      case Kind::OptionalWrap:
+      case Kind::OptionalForce:
+      case Kind::UnresolvedProperty:
+      case Kind::Property:
+        llvm_unreachable("no index expr for this kind");
+      }
+    }
 
-  /// Retrieve a mutable version of the name locations array, for
-  /// initialization purposes.
-  MutableArrayRef<SourceLoc> getNameLocsMutable() {
-    if (!ObjCKeyPathExprBits.HaveSourceLocations) return { };
+    ArrayRef<Identifier> getSubscriptLabels() const {
+      switch (getKind()) {
+      case Kind::Subscript:
+      case Kind::UnresolvedSubscript:
+        return SubscriptLabels;
+        
+      case Kind::Invalid:
+      case Kind::OptionalChain:
+      case Kind::OptionalWrap:
+      case Kind::OptionalForce:
+      case Kind::UnresolvedProperty:
+      case Kind::Property:
+        llvm_unreachable("no subscript labels for this kind");
+      }
+    }
 
-    auto mutableComponents = getComponentsMutable();
-    return { reinterpret_cast<SourceLoc *>(mutableComponents.end()),
-             mutableComponents.size() };
-  }
+    DeclName getUnresolvedDeclName() const {
+      switch (getKind()) {
+      case Kind::UnresolvedProperty:
+        return Decl.UnresolvedName;
+
+      case Kind::Invalid:
+      case Kind::Subscript:
+      case Kind::UnresolvedSubscript:
+      case Kind::OptionalChain:
+      case Kind::OptionalWrap:
+      case Kind::OptionalForce:
+      case Kind::Property:
+        llvm_unreachable("no unresolved name for this kind");
+      }
+    }
+    
+    ConcreteDeclRef getDeclRef() const {
+      switch (getKind()) {
+      case Kind::Property:
+      case Kind::Subscript:
+        return Decl.ResolvedDecl;
+
+      case Kind::Invalid:
+      case Kind::UnresolvedProperty:
+      case Kind::UnresolvedSubscript:
+      case Kind::OptionalChain:
+      case Kind::OptionalWrap:
+      case Kind::OptionalForce:
+        llvm_unreachable("no decl ref for this kind");
+      }
+    }
+    
+    Type getComponentType() const {
+      return ComponentType;
+    }
+    
+    void setComponentType(Type t) {
+      ComponentType = t;
+    }
+  };
+
+private:
+  llvm::MutableArrayRef<Component> Components;
 
 public:
   /// Create a new #keyPath expression.
-  ///
-  /// \param nameLocs The locations of the names in the key-path,
-  /// which must either have the same number of entries as \p names or
-  /// must be empty.
-  static ObjCKeyPathExpr *create(ASTContext &ctx,
-                             SourceLoc keywordLoc, SourceLoc lParenLoc,
-                             ArrayRef<Identifier> names,
-                             ArrayRef<SourceLoc> nameLocs,
-                             SourceLoc rParenLoc);
+  KeyPathExpr(ASTContext &C,
+              SourceLoc keywordLoc, SourceLoc lParenLoc,
+              ArrayRef<Component> components,
+              SourceLoc rParenLoc,
+              bool isImplicit = false);
 
-  SourceLoc getLoc() const { return KeywordLoc; }
-  SourceRange getSourceRange() const {
-    return SourceRange(KeywordLoc, RParenLoc);
+  KeyPathExpr(SourceLoc backslashLoc, Expr *parsedRoot, Expr *parsedPath,
+              bool isImplicit = false)
+      : Expr(ExprKind::KeyPath, isImplicit), StartLoc(backslashLoc),
+        EndLoc(parsedPath ? parsedPath->getEndLoc() : parsedRoot->getEndLoc()),
+        ParsedRoot(parsedRoot), ParsedPath(parsedPath) {
+    assert((parsedRoot || parsedPath) &&
+           "keypath must have either root or path");
+    KeyPathExprBits.IsObjC = false;
   }
 
-  /// Retrieve the number of components in the key-path.
-  unsigned getNumComponents() const {
-    return ObjCKeyPathExprBits.NumComponents;
+  SourceLoc getLoc() const { return StartLoc; }
+  SourceRange getSourceRange() const { return SourceRange(StartLoc, EndLoc); }
+
+  /// Get the components array.
+  ArrayRef<Component> getComponents() const {
+    return Components;
   }
-
-  /// Retrieve's the name for the (i)th component;
-  Identifier getComponentName(unsigned i) const;
-
-  /// Retrieve's the declaration corresponding to the (i)th component,
-  /// or null if this component has not yet been resolved.
-  ValueDecl *getComponentDecl(unsigned i) const {
-    return getComponents()[i].dyn_cast<ValueDecl *>();
+  MutableArrayRef<Component> getMutableComponents() {
+    return Components;
   }
-
-  /// Retrieve the location corresponding to the (i)th name.
-  ///
-  /// If no location information is available, returns an empty
-  /// \c DeclNameLoc.
-  SourceLoc getComponentNameLoc(unsigned i) const {
-    if (!ObjCKeyPathExprBits.HaveSourceLocations) return { };
-
-    auto components = getComponents();
-    ArrayRef<SourceLoc> nameLocs(
-        reinterpret_cast<SourceLoc const *>(components.end()),
-        components.size());
-
-    return nameLocs[i];
+  
+  /// Resolve the components of an un-type-checked expr. This copies over the
+  /// components from the argument array.
+  void resolveComponents(ASTContext &C,
+                         ArrayRef<Component> resolvedComponents);
+  
+  /// Retrieve the string literal expression, which will be \c NULL prior to
+  /// type checking and a string literal after type checking for an
+  /// @objc key path.
+  Expr *getObjCStringLiteralExpr() const {
+    return ObjCStringLiteralExpr;
   }
-
-  /// Retrieve the semantic expression, which will be \c NULL prior to
-  /// type checking and a string literal after type checking.
-  Expr *getSemanticExpr() const { return SemanticExpr; }
 
   /// Set the semantic expression.
-  void setSemanticExpr(Expr *expr) { SemanticExpr = expr; }
-
-  /// Resolve the given component to the given declaration.
-  void resolveComponent(unsigned idx, ValueDecl *decl) {
-    getComponentsMutable()[idx] = decl;
+  void setObjCStringLiteralExpr(Expr *expr) {
+    ObjCStringLiteralExpr = expr;
   }
+
+  Expr *getParsedRoot() const {
+    assert(!isObjC() && "cannot get parsed root of ObjC keypath");
+    return ParsedRoot;
+  }
+  void setParsedRoot(Expr *root) {
+    assert(!isObjC() && "cannot get parsed root of ObjC keypath");
+    ParsedRoot = root;
+  }
+
+  Expr *getParsedPath() const {
+    assert(!isObjC() && "cannot get parsed path of ObjC keypath");
+    return ParsedPath;
+  }
+  void setParsedPath(Expr *path) {
+    assert(!isObjC() && "cannot set parsed path of ObjC keypath");
+    ParsedPath = path;
+  }
+
+  TypeRepr *getRootType() const {
+    assert(!isObjC() && "cannot get root type of ObjC keypath");
+    return RootType;
+  }
+  void setRootType(TypeRepr *rootType) {
+    assert(!isObjC() && "cannot set root type of ObjC keypath");
+    RootType = rootType;
+  }
+
+  /// True if this is an ObjC key path expression.
+  bool isObjC() const { return KeyPathExprBits.IsObjC; }
 
   static bool classof(const Expr *E) {
-    return E->getKind() == ExprKind::ObjCKeyPath;
+    return E->getKind() == ExprKind::KeyPath;
   }
 };
+
+/// Represents the unusual behavior of a . in a \ keypath expression, such as
+/// \.[0] and \Foo.?.
+class KeyPathDotExpr : public Expr {
+  SourceLoc DotLoc;
+
+public:
+  KeyPathDotExpr(SourceLoc dotLoc)
+      : Expr(ExprKind::KeyPathDot, /*isImplicit=*/true), DotLoc(dotLoc) {}
+
+  SourceLoc getLoc() const { return DotLoc; }
+  SourceRange getSourceRange() const { return SourceRange(DotLoc, DotLoc); }
+
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::KeyPathDot;
+  }
+};
+
+inline bool Expr::isInfixOperator() const {
+  return isa<BinaryExpr>(this) || isa<IfExpr>(this) ||
+         isa<AssignExpr>(this) || isa<ExplicitCastExpr>(this);
+}
 
 #undef SWIFT_FORWARD_SOURCE_LOCS_TO
   

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -20,6 +20,7 @@
 
 #include "swift/AST/LinkLibrary.h"
 #include "swift/Basic/Sanitizers.h"
+#include "swift/Basic/OptionSet.h"
 // FIXME: This include is just for llvm::SanitizerCoverageOptions. We should
 // split the header upstream so we don't include so much.
 #include "llvm/Transforms/Instrumentation.h"
@@ -76,6 +77,9 @@ public:
   /// The command line string that is to be stored in the DWARF debug info.
   std::string DWARFDebugFlags;
 
+  /// List of -Xcc -D macro definitions.
+  std::vector<std::string> ClangDefines;
+
   /// The libraries and frameworks specified on the command line.
   SmallVector<LinkLibrary, 4> LinkLibraries;
 
@@ -93,8 +97,11 @@ public:
   /// Whether or not to run optimization passes.
   unsigned Optimize : 1;
 
+  /// Whether or not to optimize for code size.
+  unsigned OptimizeForSize : 1;
+
   /// Which sanitizer is turned on.
-  SanitizerKind Sanitize : 2;
+  OptionSet<SanitizerKind> Sanitizers;
 
   /// Whether we should emit debug info.
   IRGenDebugInfoKind DebugInfoKind : 2;
@@ -169,7 +176,8 @@ public:
 
   IRGenOptions()
       : DWARFVersion(2), OutputKind(IRGenOutputKind::LLVMAssembly),
-        Verify(true), Optimize(false), Sanitize(SanitizerKind::None),
+        Verify(true), Optimize(false), OptimizeForSize(false),
+        Sanitizers(OptionSet<SanitizerKind>()),
         DebugInfoKind(IRGenDebugInfoKind::None), UseJIT(false),
         DisableLLVMOptzns(false), DisableLLVMARCOpts(false),
         DisableLLVMSLPVectorizer(false), DisableFPElim(true), Playground(false),
@@ -193,9 +201,28 @@ public:
   unsigned getLLVMCodeGenOptionsHash() {
     unsigned Hash = 0;
     Hash = (Hash << 1) | Optimize;
+    Hash = (Hash << 1) | OptimizeForSize;
     Hash = (Hash << 1) | DisableLLVMOptzns;
     Hash = (Hash << 1) | DisableLLVMARCOpts;
     return Hash;
+  }
+
+  /// Should LLVM IR value names be emitted and preserved?
+  bool shouldProvideValueNames() const {
+    // If the command line contains an explicit request about whether to add
+    // LLVM value names, honor it.  Otherwise, add value names only if the
+    // final result is textual LLVM assembly.
+    if (HasValueNamesSetting) {
+      return ValueNames;
+    } else {
+      return OutputKind == IRGenOutputKind::LLVMAssembly;
+    }
+  }
+
+  /// Return a hash code of any components from these options that should
+  /// contribute to a Swift Bridging PCH hash.
+  llvm::hash_code getPCHHashComponents() const {
+    return llvm::hash_value(0);
   }
 };
 

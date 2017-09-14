@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -15,7 +15,7 @@
 @available(*, deprecated, message: "Please use the struct type URLRequest")
 public typealias MutableURLRequest = NSMutableURLRequest
 
-public struct URLRequest : ReferenceConvertible, CustomStringConvertible, Equatable, Hashable {
+public struct URLRequest : ReferenceConvertible, Equatable, Hashable {
     public typealias ReferenceType = NSURLRequest
     public typealias CachePolicy = NSURLRequest.CachePolicy
     public typealias NetworkServiceType = NSURLRequest.NetworkServiceType
@@ -25,8 +25,8 @@ public struct URLRequest : ReferenceConvertible, CustomStringConvertible, Equata
     */
     internal var _handle: _MutableHandle<NSMutableURLRequest>
     
-    internal mutating func _applyMutation<ReturnType>(_ whatToDo : @noescape (NSMutableURLRequest) -> ReturnType) -> ReturnType {
-        if !isUniquelyReferencedNonObjC(&_handle) {
+    internal mutating func _applyMutation<ReturnType>(_ whatToDo : (NSMutableURLRequest) -> ReturnType) -> ReturnType {
+        if !isKnownUniquelyReferenced(&_handle) {
             let ref = _handle._uncopiedReference()
             _handle = _MutableHandle(reference: ref)
         }
@@ -41,7 +41,7 @@ public struct URLRequest : ReferenceConvertible, CustomStringConvertible, Equata
         _handle = _MutableHandle(adoptingReference: NSMutableURLRequest(url: url, cachePolicy: cachePolicy, timeoutInterval: timeoutInterval))
     }
 
-    private init(_bridged request: NSURLRequest) {
+    fileprivate init(_bridged request: NSURLRequest) {
         _handle = _MutableHandle(reference: request.mutableCopy() as! NSMutableURLRequest)
     }
     
@@ -233,24 +233,41 @@ public struct URLRequest : ReferenceConvertible, CustomStringConvertible, Equata
         return _handle.map { $0.hashValue }
     }
     
-    public var description: String {
-        return _handle.map { $0.description }
-    }
-
-    public var debugDescription: String {
-        return _handle.map { $0.debugDescription }
+    public static func ==(lhs: URLRequest, rhs: URLRequest) -> Bool {
+        return lhs._handle._uncopiedReference().isEqual(rhs._handle._uncopiedReference())
     }
 }
 
-public func ==(lhs: URLRequest, rhs: URLRequest) -> Bool {
-    return lhs._handle._uncopiedReference().isEqual(rhs._handle._uncopiedReference())
+extension URLRequest : CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+
+    public var description: String {
+      return url?.description ?? "url: nil"
+    }
+    
+    public var debugDescription: String {
+        return self.description
+    }
+    
+    public var customMirror: Mirror {
+        let c: [(label: String?, value: Any)] = [
+          ("url", url as Any),
+          ("cachePolicy", cachePolicy.rawValue),
+          ("timeoutInterval", timeoutInterval),
+          ("mainDocumentURL", mainDocumentURL as Any),
+          ("networkServiceType", networkServiceType),
+          ("allowsCellularAccess", allowsCellularAccess),
+          ("httpMethod", httpMethod as Any),
+          ("allHTTPHeaderFields", allHTTPHeaderFields as Any),
+          ("httpBody", httpBody as Any),
+          ("httpBodyStream", httpBodyStream as Any),
+          ("httpShouldHandleCookies", httpShouldHandleCookies),
+          ("httpShouldUsePipelining", httpShouldUsePipelining),
+        ]
+        return Mirror(self, children: c, displayStyle: Mirror.DisplayStyle.struct)
+    }
 }
 
 extension URLRequest : _ObjectiveCBridgeable {
-    public static func _isBridgedToObjectiveC() -> Bool {
-        return true
-    }
-    
     public static func _getObjectiveCType() -> Any.Type {
         return NSURLRequest.self
     }
@@ -270,8 +287,17 @@ extension URLRequest : _ObjectiveCBridgeable {
     }
     
     public static func _unconditionallyBridgeFromObjectiveC(_ source: NSURLRequest?) -> URLRequest {
-        var result: URLRequest? = nil
+        var result: URLRequest?
         _forceBridgeFromObjectiveC(source!, result: &result)
         return result!
     }
 }
+
+extension NSURLRequest : _HasCustomAnyHashableRepresentation {
+    // Must be @nonobjc to avoid infinite recursion during bridging.
+    @nonobjc
+    public func _toCustomAnyHashable() -> AnyHashable? {
+        return AnyHashable(self as URLRequest)
+    }
+}
+
